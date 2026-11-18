@@ -1,0 +1,131 @@
+# MuseChrome · Muse 账号管理器
+
+给每个 Muse 账号准备一个**完全独立的浏览器配置目录**，点一下就用你电脑上的真 Chrome 或 Edge 打开它（每个账号自己选）：独立的登录状态、Cookie、插件和浏览数据，账号之间互不串号。管理器本身不含浏览器、不收集数据。
+
+适合需要 **Muse 多账号切换、多账号同时登录、防串号** 的人：自媒体运营、多平台账号管理、团队协作等场景，一个账号一套独立浏览器环境，登录一次，点开即用。
+
+![icon](assets/icon.png)
+
+## 下载
+
+到 [Releases](../../releases) 下载便携版 `MuseChrome-v1.7.0.exe`，双击即可运行（免安装，未签名，首次运行如遇 SmartScreen 提示，点「更多信息 → 仍要运行」）。想要安装版（双击安装、可选安装目录、自动建桌面快捷方式和开始菜单项、带卸载）的，去 Releases 里的 `setup-v1.7.0` 下载 `MuseChrome-Setup-v1.7.0.exe`。v1.5.0 起，之后的新版可以在软件里点「检查更新」直接下载、自动替换并重启，不用再来网页下载。
+
+**使用前准备：本机装有谷歌 Chrome 或微软 Edge 任一浏览器即可**——本软件用你电脑上现成的浏览器打开账号，不自带浏览器；代理请提前开好。
+
+数据保存在 exe 旁边的 `MuseChromeData/` 文件夹里，删掉 exe 不影响数据，搬走整个文件夹即可迁移。
+
+## 功能
+
+- **多账号隔离**：每个账号一个独立的浏览器配置目录（Chrome 在 `MuseChromeData/chrome-profiles/`、Edge 在 `MuseChromeData/edge-profiles/`），登录一次后免登录，重复点「打开」只多开一个窗口、不会串号。卡片上能看到每个账号的打开状态和已打开时长，也能一键关闭它的浏览器。
+- **Chrome / Edge 双支持**：每个账号在卡片上单独选浏览器，哪个账号用 Chrome、哪个用 Edge 互不影响；两个浏览器同等待遇（独立配置、代理、防泄漏、英文标识）。
+- **代理三模式**：本地代理（默认 HTTP `127.0.0.1:10808`，设置里有 v2rayN / Clash / Shadowsocks 预设按钮）、跟随系统代理（用 Clash 等开了系统代理的工具时选）、直连（开了 TUN 时选）。**每个账号还能单独指定代理**（卡片上的「代理」按钮），几个账号可以各走各的出口。
+- **防泄漏**：启动时带上 WebRTC 防泄漏参数（禁止走非代理 UDP）和英文语言标识（`--lang=en-US`），均可在设置里开关。
+- **公告栏**：左侧「公告」页显示作者发布的更新与提醒（软件启动时从作者的 Gitee 仓库拉取，有新公告时按钮会标「新」）。
+- **环境自检**：打不开账号先查这里——浏览器在不在、代理通不通（真发请求探活）、填的端口不通时自动扫描常见代理端口并可一键改用、出口 IP 与地区，一页看清。
+- **插件助手**：读出你日常 Chrome 已装的插件清单，在账号选定的浏览器里逐个打开它们的商店页，点「添加」即装好同款插件（装一次永久保留）。代理类插件（如 SwitchyOmega）默认不勾选——代理已由管理器接管，避免冲突。
+- **备份 / 恢复**：设置里一键导出 zip 备份（轻量：账号＋设置；完整：连每个账号的登录态，换电脑导入免登录），导入前会自动留一份当前数据的副本。
+- **检查更新 / 软件内更新**：左侧边栏一键检查 GitHub 最新版本（走软件里配置的代理）；有新版点「立即更新」直接在软件里下载（带进度，下载后校验文件大小与 SHA256），下载完自动关闭、替换成新版并重新打开，全程不用去网页。
+
+## 截图
+
+主界面（账号卡片上可直接切换该账号用的浏览器；截图中为演示账号）：
+
+![主界面](docs/screenshot-main-170.png)
+
+公告（作者发布的更新与提醒，有新公告时边栏按钮会标「新」）：
+
+![公告](docs/screenshot-notice-170.png)
+
+插件助手（读出日常 Chrome 的插件，逐个打开商店页安装；截图中为演示数据，不是任何人的真实清单）：
+
+![插件助手](docs/screenshot-plugins-170.png)
+
+设置（代理方式三选一，带常用工具预设；还有备份导出/导入）：
+
+![设置](docs/screenshot-settings-170.png)
+
+环境自检（浏览器、代理连通、出口信息一页查清；截图中为演示结果）：
+
+![环境自检](docs/screenshot-health-170.png)
+
+关于软件：
+
+![关于软件](docs/screenshot-about-170.png)
+
+## 使用要点
+
+- 本机装有谷歌 Chrome 或微软 Edge 任一浏览器即可，软件不自带浏览器，用的是你电脑上现成的浏览器。
+- 每个账号第一次用某个浏览器打开是全新环境，登录一次 Muse 即可；Chrome 和 Edge 各用各的配置目录，同一账号在两个浏览器里要各登录一次。
+- 改了代理/语言等启动参数后，要把该账号的浏览器窗口全部关掉再重新打开才生效。
+- 打不开账号时先去「环境自检」页查一遍，多数问题是代理工具没开或端口对不上。
+- 插件的个人设置不会从日常 Chrome 带过来，新装后按需在各账号里设置一次。
+
+## 从源码构建
+
+需要 Python 3.11 + PyQt6 + PyInstaller（Windows）：
+
+```bat
+pip install PyQt6 PyInstaller
+pyinstaller MuseChrome.spec
+```
+
+产物在 `dist/MuseChrome.exe`。
+
+## 目录结构
+
+```
+main.py            入口
+musechrome/        主程序（app.py 界面、store.py 配置与启动逻辑）
+tests/             纯逻辑测试（python tests/test_store.py）
+assets/            图标
+MuseChrome.spec    PyInstaller 打包配置
+```
+
+## 更新记录
+
+**v1.7.0**
+- 新功能：公告栏——左侧新增「公告」页，显示作者发布的更新与提醒，有新公告时按钮标「新」。
+- 新功能：支持微软 Edge——每个账号可在卡片上单独选 Chrome 或 Edge，Edge 同样有独立配置目录、代理、WebRTC 防泄漏和英文标识。
+- 新功能：每个账号可单独指定代理（跟随全局 / 直连 / 自己的地址端口），几个账号可以各走各的出口 IP。
+- 新功能：代理方式改为三模式——本地代理（新增 v2rayN / Clash / Shadowsocks 预设按钮）、跟随系统代理、直连（TUN）；不再只认 v2rayN 的端口。
+- 新功能：环境自检页——查浏览器在不在、代理通不通、自动扫描常见代理端口并可一键改用、显示出口 IP 与地区。
+- 新功能：备份 / 恢复——设置里导出 zip（轻量或含登录态的完整备份），换电脑导入即可；导入前自动保留当前数据副本。
+- 新功能：卡片显示账号已打开时长，并可一键关闭该账号的浏览器。
+- 新图标：软件图标换新（三窗叠放造型）。
+- 修复：公告页在有公告时会残留一行「暂无公告」文字的问题。
+
+**v1.6.1**
+- 新增安装版：双击安装、可选安装目录、自动创建桌面快捷方式和开始菜单项，带卸载程序（卸载不删账号数据）；程序文件名固定为 MuseChrome.exe，软件内更新原地覆盖，快捷方式不受影响。
+- 修复：账号卡片「已打开」状态改为实时跟踪 Chrome 进程——关掉浏览器后几秒内自动变回「未打开」，不再一直显示已打开。
+- 修复：便携版软件内更新后文件名不变的问题（新版以新文件名落地、自动删旧文件）；更新后首次启动加了延时，避开杀毒扫描高峰导致的 DLL 加载失败。
+- 修正：设置页「WebRTC 防泄漏」「英文语言标识」两处说明文字改成准确的功能描述，不再预设使用者的其他软件设置。
+
+**v1.6.0**
+- 改版：设置、插件助手、关于软件从独立弹窗改成主区里的页面，点边栏直接切换；边栏同一时刻只亮当前页一个按钮。
+- 修复：打开设置等弹窗时边栏出现两个按钮同时亮橙的问题（就是上条改版的原因）。
+
+**v1.5.0**
+- 新功能：软件内更新——点「检查更新」发现新版后可直接在软件里下载，校验通过后自动替换并重启，不用再去网页下载。
+- 修复：插件助手名单在 Windows 深色模式下文字变白、看不见插件名的问题（名单文字颜色写死并强制浅色显示）。
+- 修复：左侧边栏按钮点击没有反馈的问题（已加按下变色，打开对话框期间对应按钮保持高亮）。
+
+**v1.4.0**
+- 新界面：左侧深色边栏导航 + 账号卡片网格；主区顶部提示条标注「本机一定要有谷歌浏览器（Chrome）」。
+
+## English
+
+MuseChrome is a free, open-source Windows desktop app for managing multiple Muse accounts. Each Muse account gets its own isolated browser profile — separate cookies, logins, extensions and browsing data — launched with your real Chrome or Microsoft Edge (chosen per account): no account mixing, no repeated sign-ins.
+
+Features: per-account Chrome/Edge profiles, flexible proxy support (local proxy with presets for common tools, follow-system-proxy, or direct/TUN mode, plus optional per-account proxy overrides), WebRTC leak protection, an in-app announcement board, a built-in environment self-check (browser presence, proxy reachability, common-port scan, exit-IP info), backup/restore, an extension helper that re-installs your everyday Chrome extensions into each account profile, and built-in in-app updates (download in the app, auto-replace and restart). A Muse multi-account manager and account switcher for creators and teams who run several Muse accounts side by side.
+
+## 代码签名
+
+本项目的发布文件目前未进行代码签名，Windows 可能会显示「发布者未知」并弹出 SmartScreen 提示。发布文件均由本仓库公开源码构建，请只从本仓库 Releases 页面下载，确认来源后选择「仍要运行」继续安装。
+
+## 隐私
+
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.（本程序不收集、不上传任何账号数据；账号数据只保存在本机 MuseChromeData 文件夹。联网行为只有三处，都是只下载不上传：启动时从作者的 Gitee 仓库拉取公告文本、使用者点击「检查更新」时连接 GitHub、使用者点击「环境自检」时查询出口 IP 信息。程序启动的浏览器是使用者本机安装的 Chrome / Edge，其隐私政策见对应厂商的相关说明。）
+
+## 许可
+
+MIT License，见 [LICENSE](LICENSE)。
