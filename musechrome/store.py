@@ -471,7 +471,12 @@ def store_url(ext_id: str) -> str:
     return f"https://chromewebstore.google.com/detail/{ext_id}"
 
 
-def build_chrome_args(cfg: dict, profile_dir: Path, extra_urls: list[str] | None = None) -> list[str]:
+def build_chrome_args(
+    cfg: dict,
+    profile_dir: Path,
+    extra_urls: list[str] | None = None,
+    browser: str = "chrome",
+) -> list[str]:
     """组装启动浏览器的命令行参数（网址放最后）。
 
     Chrome 与 Edge 同为 Chromium 内核，这套参数两边通用：
@@ -482,6 +487,12 @@ def build_chrome_args(cfg: dict, profile_dir: Path, extra_urls: list[str] | None
         "--no-first-run",
         "--no-default-browser-check",
     ]
+    if browser == "edge":
+        args.extend([
+            "--disable-signin",
+            "--disable-sync",
+            "--disable-features=msImplicitSignin",
+        ])
     url = proxy_server_url(cfg)
     if url:
         args.append(f"--proxy-server={url}")

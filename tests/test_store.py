@@ -39,6 +39,13 @@ def main():
     check("语言参数", "--lang=en-US" in args)
     check("网址在最后", args[-1] == "https://muse.ai")
     check("免首次运行参数", "--no-first-run" in args)
+    edge_args = store.build_chrome_args(cfg, prof, browser="edge")
+    check("Edge 禁止浏览器账号登录", "--disable-signin" in edge_args)
+    check("Edge 禁止云同步", "--disable-sync" in edge_args)
+    check("Edge 禁止 Windows 账号隐式登录", "--disable-features=msImplicitSignin" in edge_args)
+    check("Chrome 不受 Edge 登录限制",
+          not any(arg in args for arg in ("--disable-signin", "--disable-sync",
+                                           "--disable-features=msImplicitSignin")))
 
     # SOCKS5 + 关代理/关防护
     cfg2 = {**cfg, "proxy_type": "socks5", "proxy_port": 7890}

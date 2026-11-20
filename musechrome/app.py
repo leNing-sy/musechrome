@@ -1992,7 +1992,9 @@ class MainWindow(QMainWindow):
             if not exe:
                 return
         profile = store.profile_dir_for_browser(acc["id"], kind)
-        args = [exe, *store.build_chrome_args(store.effective_cfg(self.cfg, acc), profile, extra_urls)]
+        args = [exe, *store.build_chrome_args(
+            store.effective_cfg(self.cfg, acc), profile, extra_urls, browser=kind
+        )]
         try:
             kwargs = {}
             if sys.platform.startswith("win"):
