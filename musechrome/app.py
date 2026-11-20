@@ -67,38 +67,6 @@ from . import store
 from . import auto_login
 
 
-class AutoLoginThread(QThread):
-    status = pyqtSignal(str)
-    result = pyqtSignal(bool, str)
-
-    def __init__(self, profile: Path, edge_path: str, launch_args: list[str],
-                 api_base: str, email: str, parent=None):
-        super().__init__(parent)
-        self.profile = profile
-        self.edge_path = edge_path
-        self.launch_args = launch_args
-        self.api_base = api_base
-        self.email = email
-
-    def run(self):
-        try:
-            auto_login.run_auto_login(
-                self.profile,
-                self.edge_path,
-                self.launch_args,
-                self.api_base,
-                self.email,
-                self.status.emit,
-                self.isInterruptionRequested,
-            )
-        except auto_login.AutoLoginError as exc:
-            self.result.emit(False, str(exc))
-        except Exception:
-            self.result.emit(False, "自动登录过程中发生错误；可以改用手动登录。")
-        else:
-            self.result.emit(True, "登录已完成。之后可以用账号卡片上的「打开 Edge」继续使用。")
-
-
 def icon_path() -> Path | None:
     """图标文件位置：打包后在 _MEIPASS/assets，源码运行时在仓库 assets/。"""
     candidates = []
@@ -833,14 +801,14 @@ class SettingsPage(QWidget):
         form.addRow("主页地址", self.edt_home)
         form.addRow("Chrome 路径", chrome_row)
         form.addRow("Edge 路径", edge_row)
-        form.addRow("自动登录邮箱 CSV", mail_csv_row)
+        form.addRow("邮箱 CSV", mail_csv_row)
         form.addRow("邮件服务 config.json", mail_config_row)
         form.addRow(self.chk_lang)
         form.addRow(self.chk_webrtc)
         form.addRow("外观", self.cmb_theme)
 
         note = QLabel(
-            "Chrome / Edge 路径留空 = 自动查找；自动登录只读取 CSV 的邮箱列和 config.json 的 mail.apiBase。"
+            "Chrome / Edge 路径留空 = 自动查找；邮箱辅助入口只读取 CSV 的邮箱列和 config.json 的 mail.apiBase。"
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {C['dim']}; font-size: 12px;")
@@ -1427,8 +1395,6 @@ class MainWindow(QMainWindow):
         self._open_timer = QTimer(self)
         self._open_timer.timeout.connect(self._open_next)
         self._procs: dict[str, subprocess.Popen] = {}
-        self._auto_login_thread: AutoLoginThread | None = None
-        self._auto_login_dialog: QProgressDialog | None = None
         # 每 2.5 秒看一眼已启动的 Chrome 主进程：退出了就把卡片状态改回「未打开」
         self._proc_timer = QTimer(self)
         self._proc_timer.timeout.connect(self._poll_procs)
@@ -1829,17 +1795,19 @@ class MainWindow(QMainWindow):
         btn_open.setObjectName("darkBtn")
         btn_open.clicked.connect(lambda _c=False, aid=acc["id"]: (self._select_account(aid), self.open_account()))
         cl.addWidget(btn_open)
-        btn_auto_login = QPushButton("自动登录 Muse")
-        btn_auto_login.clicked.connect(lambda _c=False, aid=acc["id"]: self.start_auto_login(aid))
-        btn_auto_login.setVisible(is_edge)
-        cl.addWidget(btn_auto_login)
+        btn_mail_assist = QPushButton("复制邮箱并打开取件链接")
+        btn_mail_assist.clicked.connect(
+            lambda _c=False, aid=acc["id"]: self.start_mail_assist(aid)
+        )
+        btn_mail_assist.setVisible(is_edge)
+        cl.addWidget(btn_mail_assist)
         btn_seg_chrome.clicked.connect(
-            lambda _c=False, aid=acc["id"], bo=btn_open, ba=btn_auto_login,
+            lambda _c=False, aid=acc["id"], bo=btn_open, ba=btn_mail_assist,
             bc=btn_seg_chrome, be=btn_seg_edge:
             self._set_account_browser(aid, "chrome", bo, ba, bc, be)
         )
         btn_seg_edge.clicked.connect(
-            lambda _c=False, aid=acc["id"], bo=btn_open, ba=btn_auto_login,
+            lambda _c=False, aid=acc["id"], bo=btn_open, ba=btn_mail_assist,
             bc=btn_seg_chrome, be=btn_seg_edge:
             self._set_account_browser(aid, "edge", bo, ba, bc, be)
         )
@@ -1874,7 +1842,7 @@ class MainWindow(QMainWindow):
             self._rebuild_cards()
 
     def _set_account_browser(self, acc_id: str, browser: str, btn_open: QPushButton,
-                             btn_auto_login: QPushButton, btn_chrome: QPushButton,
+                             btn_mail_assist: QPushButton, btn_chrome: QPushButton,
                              btn_edge: QPushButton):
         """卡片上切换该账号用的浏览器：存盘，并同步打开按钮的文字。
         Chrome 与 Edge 各用各的配置目录，切换后第一次打开要登录一次。"""
@@ -1887,7 +1855,7 @@ class MainWindow(QMainWindow):
         btn_chrome.setChecked(browser == "chrome")
         btn_edge.setChecked(browser == "edge")
         btn_open.setText("打开 Edge" if browser == "edge" else "打开 Chrome")
-        btn_auto_login.setVisible(browser == "edge")
+        btn_mail_assist.setVisible(browser == "edge")
 
     # ---------- 账号管理 ----------
     def _current_account(self) -> dict | None:
@@ -2045,93 +2013,39 @@ class MainWindow(QMainWindow):
         self._show_page(0)
 
     # ---------- 打开浏览器 ----------
-    def start_auto_login(self, acc_id: str):
+    def start_mail_assist(self, acc_id: str):
         acc = next((item for item in self.accounts if item["id"] == acc_id), None)
         if acc is None or acc.get("browser") != "edge":
-            QMessageBox.information(self, "自动登录", "自动登录仅支持已选择 Edge 的账号。")
+            QMessageBox.information(self, "邮箱辅助登录", "此入口仅适用于选择 Edge 的账号。")
             return
-        if self._auto_login_thread is not None and self._auto_login_thread.isRunning():
-            QMessageBox.information(self, "自动登录", "已有一个自动登录任务正在运行。")
-            return
-        if acc_id in self._launched:
-            QMessageBox.information(
-                self, "自动登录", "这个账号的 Edge 已由 MuseChrome 打开；请先关闭该窗口再开始自动登录。"
+
+        try:
+            mailboxes = auto_login.load_mailboxes(self.cfg.get("mail_accounts_csv", ""))
+            api_base = auto_login.load_mail_api_base(self.cfg.get("mail_config_path", ""))
+        except auto_login.MailAssistError as exc:
+            QMessageBox.warning(
+                self, "邮箱辅助登录", f"{exc}\n\n请在「设置」中检查 CSV 和配置文件路径。"
             )
             return
 
-        profile = store.edge_profile_dir_for(acc_id)
-        try:
-            auto_login.ensure_profile_available(profile)
-            mailboxes = auto_login.load_mailboxes(self.cfg.get("mail_accounts_csv", ""))
-            api_base = auto_login.load_mail_api_base(self.cfg.get("mail_config_path", ""))
-        except auto_login.AutoLoginError as exc:
-            QMessageBox.warning(self, "自动登录", f"{exc}\n\n请在「设置」中检查邮箱 CSV 和邮件服务配置路径。")
-            return
-
         email, ok = QInputDialog.getItem(
-            self, "选择邮箱", "本次登录使用：", mailboxes, 0, False
+            self, "选择邮箱", "复制并用于本次 Muse 登录：", mailboxes, 0, False
         )
         if not ok or not email:
             return
 
-        edge_path = store.find_browser_exe(self.cfg, "edge")
-        if not edge_path:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "选择 msedge.exe", "", "msedge.exe (msedge.exe)"
+        QApplication.clipboard().setText(email)
+        url = auto_login.mailbox_url(api_base, email)
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(
+                self, "邮箱辅助登录",
+                "邮箱已复制，但系统未能打开取件链接。你可以检查默认浏览器设置后重试。",
             )
-            if not path:
-                return
-            edge_path = path
-            self.cfg["edge_path"] = path
-            store.save_config(self.cfg)
-            self.page_settings.load(self.cfg)
-
-        try:
-            auto_login.ensure_profile_available(profile)
-        except auto_login.AutoLoginError as exc:
-            QMessageBox.warning(self, "自动登录", str(exc))
             return
-
-        effective = store.effective_cfg(self.cfg, acc)
-        args = store.build_chrome_args(effective, profile, browser="edge")
-        launch_args = [
-            arg for arg in args
-            if not arg.startswith("--user-data-dir=")
-            and not arg.startswith(("http://", "https://"))
-        ]
-        thread = AutoLoginThread(profile, edge_path, launch_args, api_base, email, self)
-        dialog = QProgressDialog("正在准备自动登录…", "取消", 0, 0, self)
-        dialog.setWindowTitle("自动登录 Muse")
-        dialog.setMinimumDuration(0)
-        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
-        dialog.canceled.connect(thread.requestInterruption)
-        thread.status.connect(dialog.setLabelText)
-        thread.result.connect(
-            lambda success, message, aid=acc_id: self._finish_auto_login(aid, success, message)
+        QMessageBox.information(
+            self, "邮箱辅助登录",
+            "邮箱已复制，取件链接已在默认浏览器中打开。请自行查收验证码，再到账号的 Edge 窗口完成登录。",
         )
-        thread.finished.connect(thread.deleteLater)
-        self._auto_login_thread = thread
-        self._auto_login_dialog = dialog
-        thread.start()
-        dialog.show()
-
-    def _finish_auto_login(self, acc_id: str, success: bool, message: str):
-        if self._auto_login_dialog is not None:
-            self._auto_login_dialog.close()
-            self._auto_login_dialog = None
-        self._auto_login_thread = None
-        if success:
-            QMessageBox.information(self, "自动登录", message)
-            return
-        box = QMessageBox(self)
-        box.setWindowTitle("自动登录未完成")
-        box.setText(message)
-        btn_manual = box.addButton("打开手动 Edge", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is btn_manual:
-            self._select_account(acc_id)
-            self.open_account()
 
     def open_account(self, extra_urls: list[str] | None = None):
         acc = self._current_account()
