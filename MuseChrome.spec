@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 # MuseChrome 打包：单文件、窗口程序（纯 PyQt6，不含 WebEngine，体积小）。
 
+from PyInstaller.utils.hooks import collect_all
+
+playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all('playwright')
+
 a = Analysis(
     ['main.py'],
     pathex=['.'],
-    binaries=[],
-    datas=[('assets/icon.png', 'assets'), ('assets/cacert.pem', 'assets')],
-    hiddenimports=[],
+    binaries=playwright_binaries,
+    datas=[('assets/icon.png', 'assets'), ('assets/cacert.pem', 'assets'), *playwright_datas],
+    hiddenimports=playwright_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

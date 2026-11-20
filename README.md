@@ -8,7 +8,7 @@
 
 ## 下载
 
-到 [Releases](../../releases) 下载便携版 `MuseChrome-v1.7.3.exe`，双击即可运行（免安装，未签名，首次运行如遇 SmartScreen 提示，点「更多信息 → 仍要运行」）。想要安装版（双击安装、可选安装目录、自动建桌面快捷方式和开始菜单项、带卸载）的，去 Releases 里的 `setup-v1.7.3` 下载 `MuseChrome-Setup-v1.7.3.exe`。v1.5.0 起，之后的新版可以在软件里点「检查更新」直接下载、自动替换并重启，不用再来网页下载。
+到 [Releases](../../releases) 下载便携版 `MuseChrome-v1.8.1.exe`，双击即可运行（免安装，未签名，首次运行如遇 SmartScreen 提示，点「更多信息 → 仍要运行」）。想要安装版（双击安装、可选安装目录、自动建桌面快捷方式和开始菜单项、带卸载）的，去 Releases 里的 `setup-v1.8.1` 下载 `MuseChrome-Setup-v1.8.1.exe`。v1.5.0 起，之后的新版可以在软件里点「检查更新」直接下载、自动替换并重启，不用再来网页下载。
 
 **使用前准备：本机装有谷歌 Chrome 或微软 Edge 任一浏览器即可**——本软件用你电脑上现成的浏览器打开账号，不自带浏览器；代理请提前开好。
 
@@ -20,6 +20,7 @@
 - **账号备注与颜色标记**：卡片上的「编辑」可以给每个账号写一句备注、选一个颜色（卡片头像底色），账号多了靠备注和颜色认号。
 - **深色外观**：边栏下方月亮按钮一键切换浅色 / 深色，立即生效（设置里也能选），晚上用不刺眼。
 - **Chrome / Edge 双支持**：每个账号在卡片上单独选浏览器，哪个账号用 Chrome、哪个用 Edge 互不影响；两个浏览器同等待遇（独立配置、代理、防泄漏、英文标识）。
+- **可选 Muse 邮箱自动登录**：Edge 账号卡片可单独启动自动登录；每次明确选择邮箱，登录态保存在该账号现有 Edge 配置中。原有手动打开方式保留；遇到验证码、人机验证或自动化错误时可改为手动登录。设置中配置邮箱 CSV 和邮件服务 `config.json` 路径；程序只使用 CSV 的「邮箱」列及 `mail.apiBase`。
 - **代理三模式**：本地代理（默认 HTTP `127.0.0.1:10808`，设置里有 v2rayN / Clash / Shadowsocks 预设按钮）、跟随系统代理（用 Clash 等开了系统代理的工具时选）、直连（开了 TUN 时选）。**每个账号还能单独指定代理**（卡片上的「代理」按钮），几个账号可以各走各的出口。
 - **防泄漏**：启动时带上 WebRTC 防泄漏参数（禁止走非代理 UDP）和英文语言标识（`--lang=en-US`），均可在设置里开关。
 - **公告栏**：左侧「公告」页显示作者发布的更新与提醒（软件启动时从作者的 Gitee 仓库拉取，有新公告时按钮会标「新」），公告正文里可以带图片。
@@ -66,16 +67,18 @@
 
 - 本机装有谷歌 Chrome 或微软 Edge 任一浏览器即可，软件不自带浏览器，用的是你电脑上现成的浏览器。
 - 每个账号第一次用某个浏览器打开是全新环境，登录一次 Muse 即可；Chrome 和 Edge 各用各的配置目录，同一账号在两个浏览器里要各登录一次。
+- 自动登录前，在「设置」中选择邮箱 CSV 和邮件服务 `config.json`；确保 CSV 有「邮箱」列且 `mail.apiBase` 可用。自动登录与同一账号的 Edge 需串行运行。
+- 自动登录需本机安装 Edge；源码构建时需安装 Playwright。当前实现尚未在真实 Muse 页面及邮件服务上验证，遇到选择器或接口差异时可用手动 Edge 登录。
 - 改了代理/语言等启动参数后，要把该账号的浏览器窗口全部关掉再重新打开才生效。
 - 打不开账号时先去「环境自检」页查一遍，多数问题是代理工具没开或端口对不上。
 - 插件的个人设置不会从日常 Chrome 带过来，新装后按需在各账号里设置一次。
 
 ## 从源码构建
 
-需要 Python 3.11 + PyQt6 + PyInstaller（Windows）：
+需要 Python 3.11 + PyQt6 + PyInstaller + Playwright（Windows）：
 
 ```bat
-pip install PyQt6 PyInstaller
+pip install PyQt6 PyInstaller playwright
 pyinstaller MuseChrome.spec
 ```
 
@@ -86,7 +89,7 @@ pyinstaller MuseChrome.spec
 ```
 main.py            入口
 musechrome/        主程序（app.py 界面、store.py 配置与启动逻辑）
-tests/             纯逻辑测试（python tests/test_store.py）
+tests/             纯逻辑测试（python tests/test_store.py、python tests/test_auto_login.py）
 assets/            图标
 MuseChrome.spec    PyInstaller 打包配置
 ```

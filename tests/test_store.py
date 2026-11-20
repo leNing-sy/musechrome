@@ -28,6 +28,8 @@ def main():
     check("默认端口 10808", cfg["proxy_port"] == 10808)
     check("默认 WebRTC 防护开", cfg["webrtc_protect"] is True)
     check("默认英文标识开", cfg["lang_en"] is True)
+    check("自动登录路径默认留空",
+          cfg["mail_accounts_csv"] == "" and cfg["mail_config_path"] == "")
     check("数据目录名", store.data_dir().name == "MuseChromeData")
 
     # 启动参数：默认全开
@@ -60,6 +62,12 @@ def main():
     # 配置往返 + 坏值修正
     store.save_config({**cfg, "proxy_port": 12345})
     check("配置往返", store.load_config()["proxy_port"] == 12345)
+    store.save_config({**cfg, "mail_accounts_csv": r"C:\mail_accounts.csv",
+                       "mail_config_path": r"C:\config.json"})
+    mail_cfg = store.load_config()
+    check("自动登录路径往返",
+          mail_cfg["mail_accounts_csv"] == r"C:\mail_accounts.csv"
+          and mail_cfg["mail_config_path"] == r"C:\config.json")
     store.save_config({"proxy_port": -5, "proxy_type": "bad", "home_url": "x"})
     bad = store.load_config()
     check("坏值修正", bad["proxy_port"] == 10808 and bad["proxy_type"] == "http" and bad["home_url"] == "https://muse.ai")

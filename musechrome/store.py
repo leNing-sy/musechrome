@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "home_url": DEFAULT_HOME_URL,
     "chrome_path": "",  # 空 = 自动找
     "edge_path": "",  # 空 = 自动找
+    "mail_accounts_csv": "",  # 自动登录邮箱列表（只使用邮箱列）
+    "mail_config_path": "",  # 外部项目 config.json（只读取 mail.apiBase）
     "lang_en": True,  # 启动参数 --lang=en-US
     "webrtc_protect": True,  # 禁止 WebRTC 走非代理 UDP，防真实 IP 泄漏
     "notice_seen": "",  # 已点开看过的最新公告指纹，用于公告按钮的（新）标记
@@ -121,6 +123,8 @@ def load_config() -> dict:
     cfg["proxy_host"] = str(cfg["proxy_host"]).strip() or "127.0.0.1"
     cfg["chrome_path"] = str(cfg["chrome_path"]).strip()
     cfg["edge_path"] = str(cfg["edge_path"]).strip()
+    cfg["mail_accounts_csv"] = str(cfg["mail_accounts_csv"]).strip()
+    cfg["mail_config_path"] = str(cfg["mail_config_path"]).strip()
     cfg["notice_seen"] = str(cfg["notice_seen"])
     return cfg
 
