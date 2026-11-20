@@ -731,6 +731,8 @@ NOTE_TEXT = """使用说明：
 class SettingsPage(QWidget):
     """设置页：在主区里切换显示，不再是独立弹窗。"""
 
+    mail_path_selected = pyqtSignal(str, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         title = QLabel("设置")
@@ -781,11 +783,18 @@ class SettingsPage(QWidget):
         mail_csv_row.addWidget(self.edt_mail_csv, 1)
         mail_csv_row.addWidget(btn_browse_mail_csv)
         self.edt_mail_config = QLineEdit()
+        self.edt_mail_config.setPlaceholderText("留空使用默认取件地址，无需准备 config.json")
         btn_browse_mail_config = QPushButton("浏览…")
         btn_browse_mail_config.clicked.connect(self._browse_mail_config)
         mail_config_row = QHBoxLayout()
         mail_config_row.addWidget(self.edt_mail_config, 1)
         mail_config_row.addWidget(btn_browse_mail_config)
+        self.edt_mail_csv.editingFinished.connect(
+            lambda: self.mail_path_selected.emit("mail_accounts_csv", self.edt_mail_csv.text())
+        )
+        self.edt_mail_config.editingFinished.connect(
+            lambda: self.mail_path_selected.emit("mail_config_path", self.edt_mail_config.text())
+        )
         self.chk_lang = QCheckBox("英文语言标识（启动时带 --lang=en-US，让浏览器语言与代理出口地区一致）")
         self.chk_webrtc = QCheckBox("WebRTC 防泄漏（禁止 WebRTC 走非代理 UDP，避免真实 IP 从 WebRTC 泄漏）")
         self.cmb_theme = QComboBox()
@@ -802,13 +811,15 @@ class SettingsPage(QWidget):
         form.addRow("Chrome 路径", chrome_row)
         form.addRow("Edge 路径", edge_row)
         form.addRow("邮箱 CSV", mail_csv_row)
-        form.addRow("邮件服务 config.json", mail_config_row)
+        form.addRow("自定义取件配置（可选）", mail_config_row)
         form.addRow(self.chk_lang)
         form.addRow(self.chk_webrtc)
         form.addRow("外观", self.cmb_theme)
 
         note = QLabel(
-            "Chrome / Edge 路径留空 = 自动查找；邮箱辅助入口只读取 CSV 的邮箱列和 config.json 的 mail.apiBase。"
+            "邮箱辅助登录只需选择含「邮箱」列的 CSV，邮箱文件路径选择后自动保存。\n"
+            f"默认取件地址：{auto_login.DEFAULT_MAIL_API_BASE}；自定义取件配置可留空。\n"
+            "其他设置修改后请点击「保存设置」。Chrome / Edge 路径留空 = 自动查找。"
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {C['dim']}; font-size: 12px;")
@@ -913,6 +924,7 @@ class SettingsPage(QWidget):
         )
         if path:
             self.edt_mail_csv.setText(path)
+            self.mail_path_selected.emit("mail_accounts_csv", path)
 
     def _browse_mail_config(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -921,6 +933,7 @@ class SettingsPage(QWidget):
         )
         if path:
             self.edt_mail_config.setText(path)
+            self.mail_path_selected.emit("mail_config_path", path)
 
 
 class PluginPage(QWidget):
@@ -1526,6 +1539,7 @@ class MainWindow(QMainWindow):
         self.page_plugins.btn_go.clicked.connect(self.install_selected_plugins)
         self.page_plugins.btn_back.clicked.connect(lambda: self._show_page(0))
         self.page_settings = SettingsPage()
+        self.page_settings.mail_path_selected.connect(self.save_mail_path)
         self.page_settings.btn_save.clicked.connect(self.save_settings)
         self.page_settings.btn_back.clicked.connect(lambda: self._show_page(0))
         self.page_settings.btn_export.clicked.connect(self.export_backup)
@@ -1627,7 +1641,8 @@ class MainWindow(QMainWindow):
         self._show_page(2)
 
     def show_settings_page(self):
-        self.page_settings.load(self.cfg)
+        if self.stack.currentIndex() != 3:
+            self.page_settings.load(self.cfg)
         self._show_page(3)
 
     def show_about_page(self):
@@ -2024,7 +2039,7 @@ class MainWindow(QMainWindow):
             api_base = auto_login.load_mail_api_base(self.cfg.get("mail_config_path", ""))
         except auto_login.MailAssistError as exc:
             QMessageBox.warning(
-                self, "邮箱辅助登录", f"{exc}\n\n请在「设置」中检查 CSV 和配置文件路径。"
+                self, "邮箱辅助登录", str(exc)
             )
             return
 
@@ -2242,12 +2257,50 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     # ---------- 设置 ----------
+    def save_mail_path(self, key: str, path: str):
+        fields = {
+            "mail_accounts_csv": self.page_settings.edt_mail_csv,
+            "mail_config_path": self.page_settings.edt_mail_config,
+        }
+        if key not in fields:
+            return
+        path = path.strip()
+        old_path = self.cfg.get(key, "")
+        if path == old_path:
+            return
+        candidate = {**self.cfg, key: path}
+        try:
+            if key == "mail_accounts_csv" and path:
+                auto_login.load_mailboxes(path)
+            elif key == "mail_config_path":
+                auto_login.load_mail_api_base(path)
+            store.save_config(candidate)
+        except (auto_login.MailAssistError, OSError) as exc:
+            fields[key].setText(old_path)
+            message = (str(exc) if isinstance(exc, auto_login.MailAssistError)
+                       else "无法保存设置，请确认软件所在目录可写。原设置已保留。")
+            self.page_settings.lbl_saved.setText("邮箱设置未保存，已保留原设置")
+            QMessageBox.warning(self, "邮箱设置未保存", message)
+            return
+        self.cfg = candidate
+        fields[key].setText(path)
+        self.page_settings.lbl_saved.setText("邮箱设置已自动保存 ✓")
+
     def save_settings(self):
-        seen = self.cfg.get("notice_seen", "")
         old_theme = self.cfg.get("theme", "light")
-        self.cfg = {**store.DEFAULT_CONFIG, **self.page_settings.collect()}
-        self.cfg["notice_seen"] = seen  # 公告已读标记不在设置页里，别被保存设置冲掉
-        store.save_config(self.cfg)
+        candidate = {**self.cfg, **self.page_settings.collect()}
+        try:
+            if candidate.get("mail_accounts_csv"):
+                auto_login.load_mailboxes(candidate["mail_accounts_csv"])
+            auto_login.load_mail_api_base(candidate.get("mail_config_path", ""))
+            store.save_config(candidate)
+        except (auto_login.MailAssistError, OSError) as exc:
+            message = (str(exc) if isinstance(exc, auto_login.MailAssistError)
+                       else "无法保存设置，请确认软件所在目录可写。原设置已保留。")
+            self.page_settings.lbl_saved.setText("未保存，请检查提示后重试")
+            QMessageBox.warning(self, "设置未保存", message)
+            return
+        self.cfg = candidate
         self._refresh_proxy_label()
         if self.cfg.get("theme") != old_theme:
             self.page_settings.lbl_saved.setText("已保存 ✓（外观下次打开软件时生效）")

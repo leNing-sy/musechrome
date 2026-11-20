@@ -10,6 +10,9 @@ from urllib.parse import quote, urlsplit
 
 
 EMAIL_COLUMN = "邮箱"
+DEFAULT_MAIL_API_BASE = "https://mail.xiongmaodianjing.top"
+
+
 class MailAssistError(RuntimeError):
     """可安全显示给用户的邮箱辅助登录错误。"""
 
@@ -50,10 +53,12 @@ def load_mailboxes(csv_path: str | Path) -> list[str]:
 
 
 def load_mail_api_base(config_path: str | Path) -> str:
-    """只提取外部项目配置中的 mail.apiBase。"""
+    """默认使用约定取件站点；仅在指定配置时读取 mail.apiBase。"""
+    if not str(config_path).strip():
+        return DEFAULT_MAIL_API_BASE
     path = Path(config_path).expanduser()
     if not path.is_file():
-        raise MailAssistError("找不到邮件服务配置文件，请检查设置中的路径。")
+        raise MailAssistError("找不到自定义取件配置文件。请重新选择，或清空该项使用默认取件地址。")
     try:
         with path.open("r", encoding="utf-8-sig") as source:
             config = json.load(source)
@@ -65,9 +70,23 @@ def load_mail_api_base(config_path: str | Path) -> str:
     if not isinstance(base, str) or not base.strip():
         raise MailAssistError("邮件服务配置中缺少 mail.apiBase。")
     base = base.strip().rstrip("/")
-    parsed = urlsplit(base)
-    if parsed.scheme != "https" or not parsed.netloc:
-        raise MailAssistError("mail.apiBase 必须是有效的 HTTPS 地址。")
+    try:
+        parsed = urlsplit(base)
+        valid = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+            and not any(char.isspace() for char in base)
+            and "\\" not in base
+        )
+        parsed.port  # 触发非法端口校验，避免点击取件时才失败。
+    except ValueError:
+        valid = False
+    if not valid:
+        raise MailAssistError("自定义取件配置的 mail.apiBase 必须是 HTTPS 地址，不能包含账号密码、查询参数或片段。")
     return base
 
 

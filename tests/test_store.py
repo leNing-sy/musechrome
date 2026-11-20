@@ -68,6 +68,10 @@ def main():
     check("自动登录路径往返",
           mail_cfg["mail_accounts_csv"] == r"C:\mail_accounts.csv"
           and mail_cfg["mail_config_path"] == r"C:\config.json")
+    store.save_config({**cfg, "mail_accounts_csv": None, "mail_config_path": None})
+    empty_mail_cfg = store.load_config()
+    check("空邮箱路径不转成 None 字符串",
+          empty_mail_cfg["mail_accounts_csv"] == "" and empty_mail_cfg["mail_config_path"] == "")
     store.save_config({"proxy_port": -5, "proxy_type": "bad", "home_url": "x"})
     bad = store.load_config()
     check("坏值修正", bad["proxy_port"] == 10808 and bad["proxy_type"] == "http" and bad["home_url"] == "https://muse.ai")
