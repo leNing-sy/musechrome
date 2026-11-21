@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('assets/icon.png', 'assets'), ('assets/cacert.pem', 'assets')],
+    datas=[('assets/icon.png', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

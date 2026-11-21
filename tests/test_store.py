@@ -1,220 +1,261 @@
-"""store.py 纯逻辑测试：临时目录里跑。用 python3 tests/test_store.py 运行。"""
+"""Core store regressions; all files and profiles are isolated fixtures."""
 
 import json
-import os
 import sys
 import tempfile
+import unittest
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import musechrome.store as store
-
-failures = []
+from musechrome import store
 
 
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        failures.append(name)
+class StoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="musechrome-store-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.base_patch = patch.object(store, "base_dir", return_value=self.root)
+        self.base_patch.start()
+        self.addCleanup(self.base_patch.stop)
+        self.cfg = store.load_config()
+        self.accounts_path = store.data_dir() / "accounts.json"
 
+    def write_accounts(self, value):
+        self.accounts_path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
-def main():
-    tmp = Path(tempfile.mkdtemp(prefix="musechrome-test-"))
-    store.base_dir = lambda: tmp  # type: ignore[assignment]
+    def test_defaults_and_email_path_roundtrip(self):
+        self.assertTrue(self.cfg["proxy_enabled"])
+        self.assertEqual(self.cfg["proxy_port"], 10808)
+        self.assertTrue(self.cfg["webrtc_protect"])
+        self.assertTrue(self.cfg["lang_en"])
+        self.assertEqual(store.data_dir().name, "MuseChromeData")
+        self.assertEqual(self.cfg["mail_accounts_csv"], "")
+        self.assertEqual(self.cfg["mail_config_path"], "")
+        store.save_config({**self.cfg, "mail_accounts_csv": r"D:\fixtures\mail.csv",
+                           "mail_config_path": r"D:\fixtures\mail.json"})
+        loaded = store.load_config()
+        self.assertEqual(loaded["mail_accounts_csv"], r"D:\fixtures\mail.csv")
+        self.assertEqual(loaded["mail_config_path"], r"D:\fixtures\mail.json")
+        store.save_config({**self.cfg, "mail_accounts_csv": None, "mail_config_path": None})
+        self.assertEqual(store.load_config()["mail_accounts_csv"], "")
+        self.assertEqual(store.load_config()["mail_config_path"], "")
 
-    cfg = store.load_config()
-    check("默认代理开", cfg["proxy_enabled"] is True)
-    check("默认端口 10808", cfg["proxy_port"] == 10808)
-    check("默认 WebRTC 防护开", cfg["webrtc_protect"] is True)
-    check("默认英文标识开", cfg["lang_en"] is True)
-    check("自动登录路径默认留空",
-          cfg["mail_accounts_csv"] == "" and cfg["mail_config_path"] == "")
-    check("数据目录名", store.data_dir().name == "MuseChromeData")
+    def test_invalid_configuration_is_normalized(self):
+        store.save_config({"proxy_port": -5, "proxy_type": "bad", "home_url": "x"})
+        cfg = store.load_config()
+        self.assertEqual((cfg["proxy_port"], cfg["proxy_type"], cfg["home_url"]),
+                         (10808, "http", "https://muse.ai"))
 
-    # 启动参数：默认全开
-    prof = Path(r"C:\fake\profile1")
-    args = store.build_chrome_args(cfg, prof)
-    check("user-data-dir", args[0] == f"--user-data-dir={prof}")
-    check("代理参数 http", "--proxy-server=http://127.0.0.1:10808" in args)
-    check("WebRTC 参数", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args)
-    check("语言参数", "--lang=en-US" in args)
-    check("网址在最后", args[-1] == "https://muse.ai")
-    check("免首次运行参数", "--no-first-run" in args)
-    edge_args = store.build_chrome_args(cfg, prof, browser="edge")
-    check("Edge 禁止浏览器账号登录", "--disable-signin" in edge_args)
-    check("Edge 禁止云同步", "--disable-sync" in edge_args)
-    check("Edge 禁止 Windows 账号隐式登录", "--disable-features=msImplicitSignin" in edge_args)
-    check("Chrome 不受 Edge 登录限制",
-          not any(arg in args for arg in ("--disable-signin", "--disable-sync",
-                                           "--disable-features=msImplicitSignin")))
+    def test_browser_arguments_retain_isolation_and_edge_restrictions(self):
+        profile = self.root / "fixture-profile"
+        chrome = store.build_chrome_args(self.cfg, profile)
+        edge = store.build_chrome_args(self.cfg, profile, browser="edge")
+        self.assertEqual(chrome[0], f"--user-data-dir={profile}")
+        self.assertEqual(chrome[-1], self.cfg["home_url"])
+        self.assertEqual(sum(arg.startswith("https://") for arg in chrome), 1)
+        for flag in ("--no-first-run", "--no-default-browser-check",
+                     "--proxy-server=http://127.0.0.1:10808",
+                     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--lang=en-US"):
+            self.assertIn(flag, chrome)
+        for flag in ("--disable-signin", "--disable-sync", "--disable-features=msImplicitSignin"):
+            self.assertIn(flag, edge)
+            self.assertNotIn(flag, chrome)
+        disabled = store.build_chrome_args({**self.cfg, "proxy_enabled": False,
+                                            "webrtc_protect": False, "lang_en": False}, profile)
+        self.assertFalse(any(arg.startswith("--proxy-server") for arg in disabled))
+        self.assertFalse(any("webrtc" in arg for arg in disabled))
+        self.assertNotIn("--lang=en-US", disabled)
 
-    # SOCKS5 + 关代理/关防护
-    cfg2 = {**cfg, "proxy_type": "socks5", "proxy_port": 7890}
-    args2 = store.build_chrome_args(cfg2, prof)
-    check("代理参数 socks5", "--proxy-server=socks5://127.0.0.1:7890" in args2)
-    cfg3 = {**cfg, "proxy_enabled": False, "webrtc_protect": False, "lang_en": False}
-    args3 = store.build_chrome_args(cfg3, prof)
-    check("关代理无参数", not any(a.startswith("--proxy-server") for a in args3))
-    check("关防护无参数", not any("webrtc" in a for a in args3))
-    check("关语言无参数", "--lang=en-US" not in args3)
+    def test_legacy_proxy_modes_and_per_account_overrides(self):
+        for enabled, mode in ((True, "local"), (False, "off")):
+            store.save_config({"proxy_enabled": enabled})
+            self.assertEqual(store.load_config()["proxy_mode"], mode)
+        self.assertIsNone(store.proxy_server_url({**self.cfg, "proxy_mode": "system"}))
+        self.assertEqual(store.effective_cfg(self.cfg, {"proxy": ""}), self.cfg)
+        direct = store.effective_cfg(self.cfg, {"proxy": "direct"})
+        self.assertEqual(direct["proxy_mode"], "off")
+        self.assertIsNone(store.proxy_server_url(direct))
+        custom = store.effective_cfg(self.cfg, {"proxy": {"type": "socks5",
+                                                  "host": "127.0.0.1", "port": 7891}})
+        self.assertEqual(store.proxy_server_url(custom), "socks5://127.0.0.1:7891")
+        self.assertEqual(len(store.PROXY_PRESETS), 3)
 
-    # 配置往返 + 坏值修正
-    store.save_config({**cfg, "proxy_port": 12345})
-    check("配置往返", store.load_config()["proxy_port"] == 12345)
-    store.save_config({**cfg, "mail_accounts_csv": r"C:\mail_accounts.csv",
-                       "mail_config_path": r"C:\config.json"})
-    mail_cfg = store.load_config()
-    check("自动登录路径往返",
-          mail_cfg["mail_accounts_csv"] == r"C:\mail_accounts.csv"
-          and mail_cfg["mail_config_path"] == r"C:\config.json")
-    store.save_config({**cfg, "mail_accounts_csv": None, "mail_config_path": None})
-    empty_mail_cfg = store.load_config()
-    check("空邮箱路径不转成 None 字符串",
-          empty_mail_cfg["mail_accounts_csv"] == "" and empty_mail_cfg["mail_config_path"] == "")
-    store.save_config({"proxy_port": -5, "proxy_type": "bad", "home_url": "x"})
-    bad = store.load_config()
-    check("坏值修正", bad["proxy_port"] == 10808 and bad["proxy_type"] == "http" and bad["home_url"] == "https://muse.ai")
+    def test_absent_and_empty_accounts_are_distinct_from_invalid_data(self):
+        self.assertEqual(store.load_accounts(), [])
+        self.assertFalse(self.accounts_path.exists())
+        self.write_accounts([])
+        self.assertEqual(store.load_accounts(), [])
 
-    # 账号往返（旧数据没有 browser 字段，读出来自动补成 chrome）
-    a1 = {"id": store.new_account_id(), "name": "账号 1"}
-    a2 = {"id": store.new_account_id(), "name": "工作号"}
-    store.save_accounts([a1, a2])
-    loaded = store.load_accounts()
-    check("账号往返", [a["name"] for a in loaded] == ["账号 1", "工作号"]
-          and all(a["browser"] == "chrome" for a in loaded))
-    e1 = {"id": store.new_account_id(), "name": "Edge 号", "browser": "edge"}
-    bad1 = {"id": store.new_account_id(), "name": "坏值号", "browser": "opera"}
-    store.save_accounts([e1, bad1])
-    loaded2 = store.load_accounts()
-    check("Edge 选择往返", loaded2[0]["browser"] == "edge" and loaded2[1]["browser"] == "chrome")
-    check("下一个名字不重名", store.next_account_name([a1, a2]) not in {"账号 1", "工作号"})
-    check("Edge 配置目录与 Chrome 分开",
-          store.profile_dir_for_browser(e1["id"], "edge") != store.profile_dir_for_browser(e1["id"], "chrome")
-          and store.profile_dir_for_browser(e1["id"], "edge").parent.name == "edge-profiles")
+    def test_legacy_account_defaults_and_proxy_normalization(self):
+        self.write_accounts([
+            {"id": "legacy-1", "name": "Fixture"},
+            {"id": "legacy-2", "name": "Other", "browser": "unsupported",
+             "proxy": {"type": "bad", "host": "", "port": 7897}},
+            {"id": "edge-1", "name": "Edge", "browser": "edge",
+             "proxy": {"type": "http", "host": "host", "port": 99999}},
+        ])
+        loaded = store.load_accounts()
+        self.assertEqual([a["browser"] for a in loaded], ["chrome", "chrome", "edge"])
+        self.assertEqual(loaded[1]["proxy"], {"type": "http", "host": "127.0.0.1", "port": 7897})
+        self.assertEqual(loaded[2]["proxy"], "")
+        self.assertNotIn(store.next_account_name(loaded), {a["name"] for a in loaded})
 
-    # 配置目录隔离 + 删除
-    p1 = store.profile_dir_for(a1["id"])
-    p2 = store.profile_dir_for(a2["id"])
-    check("配置目录隔离", p1 != p2 and p1.exists() and p2.exists())
-    store.delete_profile_dir(a1["id"])
-    check("删配置目录", not p1.exists() and p2.exists())
+    def test_retired_note_and_color_survive_name_edit_roundtrip(self):
+        note = "保留已有备注" * 20
+        self.write_accounts([{"id": "old-metadata", "name": "Before",
+                              "note": note, "color": "legacy-color-value"}])
+        accounts = store.load_accounts()
+        accounts[0]["name"] = "After"
+        store.save_accounts(accounts)
+        loaded = store.load_accounts()[0]
+        self.assertEqual(loaded["name"], "After")
+        self.assertEqual(loaded["note"], note)
+        self.assertEqual(loaded["color"], "legacy-color-value")
 
-    # find_chrome：手动路径优先
-    fake = tmp / "chrome.exe"
-    fake.write_bytes(b"MZ")
-    check("手动路径命中", store.find_chrome({**cfg, "chrome_path": str(fake)}) == str(fake))
-    check("手动路径无效时自动找（本机无 Chrome 返回空）",
-          store.find_chrome({**cfg, "chrome_path": str(tmp / "nope.exe")}) in ("", str(fake)) or True)
+    def test_invalid_json_or_schema_is_reported_without_modification(self):
+        invalid_payloads = [b"{broken", b"\xff\xff", b"{}", b"null", b"[null]",
+                            b"[{}]", b'[ {"id":"ok","name":"   "} ]',
+                            b'[ {"id": 1,"name":"Fixture"} ]']
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                self.accounts_path.write_bytes(payload)
+                with self.assertRaises(store.AccountDataError):
+                    store.load_accounts()
+                self.assertEqual(self.accounts_path.read_bytes(), payload)
+                self.assertFalse(self.accounts_path.with_suffix(".tmp").exists())
 
-    # 插件助手：伪造日常 Chrome 配置目录，验清单读取/名字解析/商店链接/多标签参数
-    ud = tmp / "User Data"
-    prof = ud / "Default"
-    ext_a, ext_b, ext_c = "a" * 32, "b" * 32, "c" * 32
-    for eid, ver in ((ext_a, "1.0_0"), (ext_b, "2.0_0")):
-        vd = prof / "Extensions" / eid / ver
-        vd.mkdir(parents=True)
-        if eid == ext_a:
-            (vd / "manifest.json").write_text(json.dumps({"name": "Spoof Timezone"}), encoding="utf-8")
-        else:
-            (vd / "manifest.json").write_text(
-                json.dumps({"name": "__MSG_appName__", "default_locale": "en"}), encoding="utf-8"
-            )
-            loc = vd / "_locales" / "en"
-            loc.mkdir(parents=True)
-            (loc / "messages.json").write_text(
-                json.dumps({"appName": {"message": "AdGuard AdBlocker"}}), encoding="utf-8"
-            )
-    (prof / "Secure Preferences").write_text(
-        json.dumps({"extensions": {"settings": {
-            ext_a: {"state": 1}, ext_b: {"state": 1}, ext_c: {"state": 1},
-        }}}),
-        encoding="utf-8",
-    )
-    old_local = os.environ.get("LOCALAPPDATA")
-    os.environ["LOCALAPPDATA"] = str(tmp)
-    try:
-        # main_chrome_user_data 找的是 tmp/Google/Chrome/User Data，把伪造目录挪过去
-        target = tmp / "Google" / "Chrome"
-        target.mkdir(parents=True)
-        (ud).rename(target / "User Data")
-        exts = store.list_source_extensions()
-    finally:
-        if old_local is None:
-            os.environ.pop("LOCALAPPDATA", None)
-        else:
-            os.environ["LOCALAPPDATA"] = old_local
-    names = {e["id"]: e["name"] for e in exts}
-    check("插件清单只收有目录的", set(names) == {ext_a, ext_b})
-    check("插件直名解析", names.get(ext_a) == "Spoof Timezone")
-    check("插件 __MSG_ 名解析", names.get(ext_b) == "AdGuard AdBlocker")
-    check("商店链接", store.store_url(ext_a) == f"https://chromewebstore.google.com/detail/{ext_a}")
-    args2 = store.build_chrome_args(cfg, p2, ["https://example.com/x"])
-    check("多标签参数在主页之后", args2[-2] == cfg["home_url"] and args2[-1] == "https://example.com/x")
+    def test_unreadable_accounts_file_is_not_treated_as_empty(self):
+        self.write_accounts([{"id": "safe", "name": "Fixture"}])
+        before = self.accounts_path.read_bytes()
+        with patch.object(Path, "read_text", side_effect=PermissionError("fixture denied")):
+            with self.assertRaises(store.AccountDataError):
+                store.load_accounts()
+        self.assertEqual(self.accounts_path.read_bytes(), before)
 
-    # 检查更新：版本号解析与比较
-    check("版本解析带 v", store.parse_version("v1.2.0") == (1, 2, 0))
-    check("版本解析无 v", store.parse_version("1.10.3") == (1, 10, 3))
-    check("版本比较 1.10 > 1.9", store.is_newer("v1.10.0", "1.9.9") is True)
-    check("版本比较相同不算新", store.is_newer("v1.3.0", "1.3.0") is False)
-    check("版本比较旧版不算新", store.is_newer("v1.2.0", "1.3.0") is False)
+    def test_duplicate_ids_including_windows_case_aliases_are_rejected(self):
+        for second_id in ("same", "SAME"):
+            accounts = [{"id": "same", "name": "First"},
+                        {"id": second_id, "name": "Second"}]
+            self.write_accounts(accounts)
+            before = self.accounts_path.read_bytes()
+            with self.assertRaises(store.AccountDataError):
+                store.load_accounts()
+            with self.assertRaises(store.AccountDataError):
+                store.save_accounts(accounts)
+            self.assertEqual(self.accounts_path.read_bytes(), before)
 
-    # 内置 CA 包能找到（检查更新的证书校验靠它）
-    ca = store.ca_bundle_path()
-    check("内置 CA 包存在", ca is not None and ca.is_file() and ca.stat().st_size > 100_000)
+    def test_invalid_ids_never_reach_directory_creation_or_deletion(self):
+        invalid_ids = ("..", ".", "../outside", "..\\outside",
+                       str(self.root / "outside"), r"C:\outside", "a/b", "a:b",
+                       "trailing.", "trailing ", "NUL", "con", "COM1",
+                       "LPT9", "x" * 65, "", None, 42)
+        for acc_id in invalid_ids:
+            with self.subTest(acc_id=acc_id), patch.object(store.shutil, "rmtree") as remove:
+                for operation in (store.profile_dir_for, store.edge_profile_dir_for,
+                                  store.delete_profile_dir, store.delete_edge_profile_dir):
+                    with self.assertRaises(store.AccountDataError):
+                        operation(acc_id)
+                remove.assert_not_called()
+                self.write_accounts([{"id": acc_id, "name": "Fixture"}])
+                original = self.accounts_path.read_bytes()
+                with self.assertRaises(store.AccountDataError):
+                    store.load_accounts()
+                with self.assertRaises(store.AccountDataError):
+                    store.save_accounts([{"id": acc_id, "name": "Fixture"}])
+                self.assertEqual(self.accounts_path.read_bytes(), original)
+        self.assertFalse((self.root / "outside").exists())
 
-    # 代理模式：老配置按开关推导；system/off 不给浏览器传代理参数
-    store.save_config({"proxy_enabled": True})
-    check("老配置推导本地模式", store.load_config()["proxy_mode"] == "local")
-    store.save_config({"proxy_enabled": False})
-    check("老配置推导直连模式", store.load_config()["proxy_mode"] == "off")
-    store.save_config({"proxy_mode": "system", "proxy_port": 10808})
-    cfg_sys = store.load_config()
-    check("系统模式不传代理参数", store.proxy_server_url(cfg_sys) is None)
-    check("本地模式给出代理地址",
-          store.proxy_server_url({**cfg_sys, "proxy_mode": "local"}) == "http://127.0.0.1:10808")
+    def test_resolved_profile_boundary_blocks_redirected_account_path(self):
+        root = store.profiles_dir().resolve()
+        outside = self.root / "outside"
+        real_resolve = Path.resolve
+        def fixture_resolve(path, *args, **kwargs):
+            if path == root / "redirected":
+                return outside
+            return real_resolve(path, *args, **kwargs)
+        with patch.object(Path, "resolve", fixture_resolve), patch.object(store.shutil, "rmtree") as remove:
+            with self.assertRaises(store.AccountDataError):
+                store.delete_profile_dir("redirected")
+            with self.assertRaises(store.AccountDataError):
+                store.profile_dir_for("redirected")
+            remove.assert_not_called()
+        self.assertFalse(outside.exists())
 
-    # 每账号代理覆盖
-    base = store.load_config()
-    acc_inherit = {"id": "x1", "name": "继承", "browser": "chrome", "proxy": ""}
-    acc_direct = {"id": "x2", "name": "直连", "browser": "chrome", "proxy": "direct"}
-    acc_custom = {"id": "x3", "name": "自定义", "browser": "edge",
-                  "proxy": {"type": "socks5", "host": "127.0.0.1", "port": 7891}}
-    check("账号代理继承全局", store.effective_cfg(base, acc_inherit)["proxy_mode"] == base["proxy_mode"])
-    check("账号代理直连", store.proxy_server_url(store.effective_cfg(base, acc_direct)) is None
-          and store.effective_cfg(base, acc_direct)["proxy_mode"] == "off")
-    check("账号代理自定义",
-          store.proxy_server_url(store.effective_cfg(base, acc_custom)) == "socks5://127.0.0.1:7891")
-    store.save_accounts([acc_custom, {"id": "x4", "name": "坏代理", "browser": "chrome",
-                                      "proxy": {"type": "http", "host": "h", "port": 99999}}])
-    loaded3 = store.load_accounts()
-    check("账号代理往返与坏值清洗",
-          loaded3[0]["proxy"]["port"] == 7891 and loaded3[1]["proxy"] == "")
+    def test_profile_redirect_to_other_account_or_root_is_rejected(self):
+        root = store.profiles_dir().resolve()
+        real_resolve = Path.resolve
+        for redirect in (root / "other-account", self.root / "outside-root"):
+            def fixture_resolve(path, *args, **kwargs):
+                if path == root / "redirected":
+                    return redirect
+                return real_resolve(path, *args, **kwargs)
+            with self.subTest(redirect=redirect), patch.object(Path, "resolve", fixture_resolve), \
+                 patch.object(store.shutil, "rmtree") as remove:
+                with self.assertRaises(store.AccountDataError):
+                    store.delete_profile_dir("redirected")
+                remove.assert_not_called()
+        redirected_root = store.data_dir() / "edge-profiles"
+        def fixture_root_resolve(path, *args, **kwargs):
+            if path == root:
+                return redirected_root
+            return real_resolve(path, *args, **kwargs)
+        with patch.object(Path, "resolve", fixture_root_resolve), patch.object(store.shutil, "rmtree") as remove:
+            with self.assertRaises(store.AccountDataError):
+                store.delete_profile_dir("fixture")
+            remove.assert_not_called()
 
-    # 备份导出/导入往返（轻量）
-    import tempfile as _tf
-    zip_path = str(Path(_tf.mkdtemp()) / "bk.zip")
-    store.save_accounts([acc_inherit])
-    store.export_backup(zip_path, include_profiles=False)
-    store.save_accounts([acc_direct])
-    summary = store.import_backup(zip_path)
-    check("备份导入往返", summary["accounts"] == 1 and store.load_accounts()[0]["id"] == "x1"
-          and summary["profiles"] is False)
+    def test_profile_isolation_and_delete_target_scope(self):
+        chrome = store.profile_dir_for_browser("fixture-1", "chrome")
+        edge = store.profile_dir_for_browser("fixture-1", "edge")
+        other = store.profile_dir_for("fixture-2")
+        self.assertNotEqual(chrome, edge)
+        self.assertEqual(chrome.parent.name, "chrome-profiles")
+        self.assertEqual(edge.parent.name, "edge-profiles")
+        with patch.object(store.shutil, "rmtree") as remove:
+            store.delete_profile_dir("fixture-1")
+            store.delete_edge_profile_dir("fixture-1")
+            self.assertEqual([call.args[0] for call in remove.call_args_list], [chrome, edge])
+        self.assertTrue(other.is_dir())
 
-    # 备注与颜色标记往返（v1.8.0）：存进去要原样读回来，坏颜色要清洗掉
-    store.save_accounts([
-        {"id": "n1", "name": "注号", "browser": "chrome", "proxy": "",
-         "note": "主号 · 天天用", "color": "#2980b9"},
-        {"id": "n2", "name": "坏色号", "browser": "chrome", "proxy": "",
-         "note": "x", "color": "red;evil"},
-    ])
-    loaded_n = store.load_accounts()
-    check("备注与颜色往返", loaded_n[0]["note"] == "主号 · 天天用" and loaded_n[0]["color"] == "#2980b9")
-    check("坏颜色被清洗", loaded_n[1]["color"] == "")
+    def test_manual_browser_paths_and_discovery_are_isolated(self):
+        chrome = self.root / "chrome.exe"
+        edge = self.root / "msedge.exe"
+        chrome.write_bytes(b"MZ")
+        edge.write_bytes(b"MZ")
+        self.assertEqual(store.find_browser_exe({**self.cfg, "chrome_path": str(chrome)}, "chrome"), str(chrome))
+        self.assertEqual(store.find_browser_exe({**self.cfg, "edge_path": str(edge)}, "edge"), str(edge))
+        with patch.object(store, "chrome_candidates", return_value=[chrome]), \
+             patch.object(store, "edge_candidates", return_value=[edge]):
+            self.assertEqual(store.find_chrome({"chrome_path": str(self.root / "missing")}), str(chrome))
+            self.assertEqual(store.find_edge({"edge_path": str(self.root / "missing")}), str(edge))
+        with patch.object(store, "chrome_candidates", return_value=[]):
+            self.assertEqual(store.find_chrome({"chrome_path": ""}), "")
 
-    print("FAILURES:", failures if failures else "none")
-    return 1 if failures else 0
+    def test_backup_exports_only_requested_data_without_modifying_source(self):
+        accounts = [{"id": "fixture-1", "name": "Fixture"}]
+        store.save_accounts(accounts)
+        store.save_config(self.cfg)
+        chrome_file = store.profile_dir_for("fixture-1") / "profile-fixture.txt"
+        edge_file = store.edge_profile_dir_for("fixture-1") / "profile-fixture.txt"
+        chrome_file.write_text("chrome fixture", encoding="utf-8")
+        edge_file.write_text("edge fixture", encoding="utf-8")
+        before = {path: path.read_bytes() for path in (self.accounts_path, chrome_file, edge_file)}
+        for include_profiles in (False, True):
+            archive_path = self.root / f"backup-{include_profiles}.zip"
+            store.export_backup(str(archive_path), include_profiles=include_profiles)
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertIsNone(archive.testzip())
+                self.assertIn("MuseChromeData/accounts.json", archive.namelist())
+                self.assertIn("MuseChromeData/config.json", archive.namelist())
+                self.assertEqual(any("-profiles/" in n for n in archive.namelist()), include_profiles)
+                if include_profiles:
+                    self.assertEqual(archive.read("MuseChromeData/edge-profiles/fixture-1/profile-fixture.txt"), b"edge fixture")
+        for path, contents in before.items():
+            self.assertEqual(path.read_bytes(), contents)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main()

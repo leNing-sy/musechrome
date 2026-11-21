@@ -74,7 +74,6 @@ class MailAssistUiTests(unittest.TestCase):
             "musechrome.app.QFileDialog.getOpenFileName", return_value=("", "")
         )
         for target in (
-            "musechrome.app.urllib.request.urlopen",
             "musechrome.app.socket.create_connection",
             "musechrome.app.subprocess.Popen",
         ):
@@ -126,8 +125,7 @@ class MailAssistUiTests(unittest.TestCase):
 
     def test_real_main_window_wiring_saves_selection_and_uses_it(self):
         store.save_accounts(self.window.accounts)
-        with patch.object(app.MainWindow, "_fetch_notices"):
-            window = app.MainWindow(store.load_config())
+        window = app.MainWindow(store.load_config())
         self.addCleanup(self.close_window, window)
         window.show_settings_page()
         self.choose_file.return_value = (str(self.csv), "CSV files (*.csv)")

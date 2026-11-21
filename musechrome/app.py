@@ -8,23 +8,16 @@
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import socket
-import ssl
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QEasingCurve,
     QLibraryInfo,
-    QPropertyAnimation,
     QTimer,
     Qt,
     QThread,
@@ -32,7 +25,7 @@ from PyQt6.QtCore import (
     QUrl,
     pyqtSignal,
 )
-from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QPalette, QPixmap
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPalette, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -42,18 +35,14 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QProgressDialog,
     QRadioButton,
     QScrollArea,
     QSpinBox,
@@ -83,117 +72,6 @@ def icon_path() -> Path | None:
 def app_icon() -> QIcon:
     p = icon_path()
     return QIcon(str(p)) if p else QIcon()
-
-
-LATEST_API = (
-    REPO_URL.replace("https://github.com/", "https://api.github.com/repos/")
-    + "/releases/latest"
-)
-
-# 公告文件放在作者的 Gitee 仓库里（国内直连可读），作者在 Gitee 网页上
-# 改这个文件即可更新公告，所有用户的软件打开时读它。
-# 地址内置在软件里，用户侧无需任何设置。注意要用 gitee.com 的这条
-# 规范地址（会自动跳转到带签名的 CDN 地址），签名地址会过期，不能内置。
-NOTICE_URL = "https://gitee.com/xiaoyaodev/musechrome/raw/master/announcements.md"
-
-
-def parse_notices(text: str) -> list[dict]:
-    """把公告文本切成一条条公告。
-
-    约定格式：公告之间用单独一行 --- 隔开；每条里「标题：」「日期：」
-    开头的行是标题和日期，其余行是正文；最新的公告放最上面。
-    以 <!-- 开头的说明块跳过。解析尽量宽容：缺标题就拿正文第一行顶上。
-    """
-    import hashlib
-
-    # 统一换行：公告文件经 Gitee 网页编辑器保存后是 CRLF（Windows 换行），
-    # 不先归一化，分隔行 --- 后面挂着 \r，正则切不开，两条公告会黏成一条
-    # （v1.7.0 真出过这个 bug，用户截图为证）。
-    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-
-    # 先整段抹掉 <!-- --> 注释（文件头部的格式说明就写在注释里，
-    # 它后面紧跟第一条公告，不能按块跳过，否则会连公告一起吃掉）
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
-    notices = []
-    for block in re.split(r"(?m)^[ \t]*---[ \t]*$", text):
-        block = block.strip()
-        if not block or block.startswith("<!--"):
-            continue
-        title, date, body_lines, images = "", "", [], []
-        for line in block.splitlines():
-            s = line.strip()
-            if s.startswith(("标题：", "标题:")) and not title:
-                title = s[3:].strip()
-            elif s.startswith(("日期：", "日期:")) and not date:
-                date = s[3:].strip()
-            else:
-                url = _notice_image_url(s)
-                if url:
-                    images.append(url)
-                else:
-                    body_lines.append(line.rstrip())
-        body = "\n".join(body_lines).strip()
-        if not title and not body:
-            continue
-        if not title:
-            lines = body.splitlines()
-            title = lines[0][:30]
-            body = "\n".join(lines[1:]).strip()
-        notices.append({
-            "title": title,
-            "date": date,
-            "body": body,
-            "images": images,
-            "id": hashlib.sha256(
-                f"{title}\n{date}\n{body}".encode("utf-8")
-            ).hexdigest()[:16],
-        })
-    return notices
-
-
-_MD_IMG_RE = re.compile(r"^!\[[^\]]*\]\((https?://[^)\s]+)\)$")
-_IMG_EXT_RE = re.compile(r"\.(png|jpe?g|gif|webp)(\?\S*)?$", re.I)
-
-
-def _notice_image_url(s: str) -> str:
-    """公告正文里单独一行的图片地址（三种写法都认），不是图片行就返回空字符串。
-
-    写法：①「图片：https://…」 ② Markdown 的 ![](https://…) ③ 一行就是图片
-    地址本身（带图片扩展名）。普通链接行不会被误吃。
-    """
-    m = _MD_IMG_RE.match(s)
-    if m:
-        return m.group(1)
-    if s.startswith(("图片：", "图片:")):
-        rest = s[3:].strip()
-        if rest.startswith(("http://", "https://")) and " " not in rest:
-            return rest
-        return ""
-    if re.fullmatch(r"https?://\S+", s) and _IMG_EXT_RE.search(s):
-        return s
-    return ""
-
-
-class NoticeFetcher(QThread):
-    """后台拉公告文本：走软件里配置的本地代理（关代理则直连），证书用打包的 CA 包。"""
-
-    done = pyqtSignal(bool, str, str)  # 成功?, 公告原文, 失败原因
-
-    def __init__(self, proxy_url: str | None, parent=None):
-        super().__init__(parent)
-        self.proxy_url = proxy_url
-
-    def run(self):
-        try:
-            opener = _make_opener(self.proxy_url)
-            req = urllib.request.Request(
-                NOTICE_URL, headers={"User-Agent": "MuseChrome"}
-            )
-            with opener.open(req, timeout=10) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
-            self.done.emit(True, text, "")
-        except Exception as exc:
-            self.done.emit(False, "", _update_error_detail(exc))
 
 
 def probe_http_proxy(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
@@ -242,401 +120,81 @@ def probe_proxy(ptype: str, host: str, port: int, timeout: float = 6.0) -> tuple
 
 
 def _timed_probe(ptype: str, host: str, port: int, timeout: float = 8) -> tuple[bool, str, int]:
-    """探活并计时（毫秒）：自检页拿这个数当代理延迟展示。"""
+    """探活并计时（毫秒）：代理检测页仅作参考展示。"""
     t0 = time.monotonic()
     ok, detail = probe_proxy(ptype, host, port, timeout=timeout)
     return ok, detail, int((time.monotonic() - t0) * 1000)
 
 
 class HealthChecker(QThread):
-    """环境自检：浏览器在不在、代理通不通、出口在哪，一项项报给自检页。"""
-
-    item = pyqtSignal(str, str, str)  # 项目名, ok/warn/fail, 说明
-    scan_found = pyqtSignal(list)  # 扫描到的可用代理端口
-    all_done = pyqtSignal()
+    """Only probe the configured global proxy on explicit request."""
+    item = pyqtSignal(str, str, str)
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
-        self.cfg = cfg
+        self.cfg = dict(cfg)
 
     def run(self):
-        cfg = self.cfg
-        chrome = store.find_chrome(cfg)
-        self.item.emit("谷歌 Chrome", "ok" if chrome else "warn",
-                       chrome or "没找到（不用 Chrome 可忽略；设置页里可以手动指定路径）")
-        edge = store.find_edge(cfg)
-        self.item.emit("微软 Edge", "ok" if edge else "warn",
-                       edge or "没找到（不用 Edge 可忽略；设置页里可以手动指定路径）")
-
-        mode = cfg.get("proxy_mode", "local")
-        exit_proxy: str | None = None  # 拿出口信息时走的代理（None = 直连）
-        exit_skip = ""
-        if mode == "local":
-            ptype, host, port = cfg["proxy_type"], cfg["proxy_host"], int(cfg["proxy_port"])
-            # 冷连接经远端节点建连经常超过 3 秒（真机踩过：第一次误报超时、
-            # 再测一次就通），所以放宽到 8 秒并自动重试一次。
-            ok, detail, ms = _timed_probe(ptype, host, port, timeout=8)
-            if not ok:
-                ok, detail, ms = _timed_probe(ptype, host, port, timeout=8)
-            if ok:
-                self.item.emit("本地代理", "ok", f"{ptype.upper()} {host}:{port} 可用")
-                self.item.emit("代理延迟", "ok" if ms < 800 else "warn",
-                               f"约 {ms} ms（经代理取测试页的往返时间，仅供参考，可能有误差）")
-                exit_proxy = store.proxy_server_url(cfg)
-                if ptype == "socks5":
-                    exit_skip = "SOCKS5 代理下自检拿不到出口信息，可点下面按钮在浏览器里看"
-            else:
-                # 再换另一种协议试一遍：端口通着但协议设错时也是干等超时，
-                # 探出来直接告诉用户改哪个，别只报一句不可用。
-                alt = "socks5" if ptype == "http" else "http"
-                alt_ok, _alt_detail = probe_proxy(alt, host, port, timeout=8)
-                if alt_ok:
-                    self.item.emit("本地代理", "warn",
-                                   f"{host}:{port} 通的是 {alt.upper()}，不是 {ptype.upper()}——去设置里把代理类型改成 {alt.upper()} 再测")
-                    if alt == "socks5":
-                        exit_skip = "SOCKS5 代理下自检拿不到出口信息，可点下面按钮在浏览器里看"
-                    else:
-                        exit_proxy = f"http://{host}:{port}"
-                else:
-                    self.item.emit("本地代理", "fail",
-                                   f"{ptype.upper()} {host}:{port} 不可用（{detail}）——先确认代理工具开着")
-                    found = []
-                    for p in store.COMMON_PROXY_PORTS:
-                        if p == port:
-                            continue
-                        if probe_http_proxy("127.0.0.1", p, timeout=2.5)[0]:
-                            found.append(p)
-                    self.scan_found.emit(found)
-                    self.item.emit("常见端口扫描", "ok" if found else "fail",
-                                   ("在端口 " + "、".join(str(p) for p in found) + " 找到可用代理，点下面按钮一键改用")
-                                   if found else "常见端口都没找到可用代理，你的工具可能用的冷门端口，去设置里手动填")
-        elif mode == "system":
-            sp = store.system_proxy_url()
-            if not sp:
-                self.item.emit("系统代理", "fail",
-                               "没读到已启用的系统代理——在你的代理工具里打开「系统代理」开关，或改用本地代理模式")
-            else:
-                u = urllib.parse.urlparse(sp)
-                t0 = time.monotonic()
-                ok, detail = probe_http_proxy(u.hostname or "", u.port or 80, timeout=8)
-                ms = int((time.monotonic() - t0) * 1000)
-                self.item.emit("系统代理", "ok" if ok else "fail",
-                               f"系统代理是 {sp}" + ("，可用" if ok else f"，但不可用（{detail}）"))
-                if ok:
-                    self.item.emit("代理延迟", "ok" if ms < 800 else "warn",
-                                   f"约 {ms} ms（经代理取测试页的往返时间，仅供参考，可能有误差）")
-                    exit_proxy = sp
+        mode = self.cfg.get("proxy_mode", "local")
+        if mode == "off":
+            self.item.emit("直连模式", "warn", "当前未配置代理，无需检测。")
+            return
+        if mode == "system":
+            url = store.system_proxy_url()
+            if not url:
+                self.item.emit("系统代理", "fail", "未读取到系统代理，请检查代理工具的系统代理开关。")
+                return
+            parsed = urllib.parse.urlparse(url)
+            ptype = "socks5" if parsed.scheme == "socks5" else "http"
+            host, port = parsed.hostname or "", parsed.port or 80
         else:
-            ok, detail = False, ""
-            try:
-                with socket.create_connection(("www.gstatic.com", 80), timeout=3) as s:
-                    s.settimeout(3)
-                    s.sendall(b"GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n")
-                    line = s.recv(200).decode("latin-1", errors="replace").splitlines()[0]
-                ok = " 204" in line or " 200" in line
-                detail = line.strip()
-            except Exception as exc:
-                detail = str(exc)[:60]
-            self.item.emit("直连", "ok" if ok else "warn",
-                           "直连能打开外网，TUN 应该在工作" if ok
-                           else f"直连打不开外网（{detail}）——没开 TUN 的话请改用本地代理或跟随系统代理")
-
-        if exit_skip:
-            self.item.emit("出口信息", "warn", exit_skip)
-        else:
-            try:
-                opener = _make_opener(exit_proxy)
-                req = urllib.request.Request(
-                    "http://ip-api.com/json/?fields=status,query,country,regionName,city,isp",
-                    headers={"User-Agent": "MuseChrome"},
-                )
-                with opener.open(req, timeout=8) as resp:
-                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if data.get("status") == "success":
-                    where = " ".join(x for x in [data.get("country", ""), data.get("regionName", ""), data.get("city", "")] if x)
-                    self.item.emit("出口信息", "ok", f"{data.get('query', '')} · {where} · {data.get('isp', '')}")
-                else:
-                    self.item.emit("出口信息", "warn", "拿不到出口信息（不影响使用）")
-            except Exception:
-                self.item.emit("出口信息", "warn", "拿不到出口信息（不影响使用）")
-        self.all_done.emit()
+            ptype = self.cfg["proxy_type"]
+            host, port = self.cfg["proxy_host"], int(self.cfg["proxy_port"])
+        ok, detail, ms = _timed_probe(ptype, host, port, timeout=8)
+        self.item.emit("代理连接", "ok" if ok else "fail",
+                       f"{ptype.upper()} {host}:{port}：" + ("可用" if ok else f"不可用（{detail}）"))
+        if ok:
+            self.item.emit("请求耗时", "ok", f"约 {ms} ms，仅供参考。")
 
 
 class HealthPage(QWidget):
-    """环境自检页：逐项列出检查结果，扫描到可用端口时给一键改用按钮。"""
-
+    """An opt-in connection test for the configured global proxy."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        title = QLabel("环境自检")
+        title = QLabel("代理检测")
         title.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {C['text']};")
-        intro = QLabel("打不开账号，先在这里查一遍：浏览器在不在、代理通不通、出口 IP 在哪。")
-        intro.setStyleSheet(f"color: {C['dim']};")
+        intro = QLabel("仅通过设置中的全局代理请求 gstatic 测试页；不查询出口 IP、不扫描端口、不修改设置。账号单独配置的代理不在此检测。")
         intro.setWordWrap(True)
         self.btn_start = QPushButton("开始检测")
         self.btn_start.setObjectName("primaryBtn")
-        self.btn_leak = QPushButton("在当前账号浏览器里打开指纹检测页")
         self.btn_back = QPushButton("返回账号列表")
         row = QHBoxLayout()
         row.addWidget(self.btn_start)
-        row.addWidget(self.btn_leak)
         row.addWidget(self.btn_back)
         row.addStretch(1)
         self._results_host = QWidget()
         self._results = QVBoxLayout(self._results_host)
-        self._results.setContentsMargins(0, 0, 0, 0)
-        self._results.setSpacing(8)
-        self._actions_host = QWidget()
-        self._actions = QHBoxLayout(self._actions_host)
-        self._actions.setContentsMargins(0, 0, 0, 0)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 16)
-        layout.setSpacing(12)
         layout.addWidget(title)
         layout.addWidget(intro)
         layout.addLayout(row)
         layout.addWidget(self._results_host)
-        layout.addWidget(self._actions_host)
         layout.addStretch(1)
-        self.on_apply_port = None  # MainWindow 挂进来
 
     def clear_results(self):
         while self._results.count():
             item = self._results.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
-        self.clear_actions()
-
-    def clear_actions(self):
-        while self._actions.count():
-            item = self._actions.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
+            if item.widget() is not None:
+                item.widget().deleteLater()
 
     def add_result(self, name: str, status: str, text: str):
-        color = {"ok": "#2e7d32", "warn": "#e8930c", "fail": "#c62828"}.get(status, "#8a7f6e")
-        row = QHBoxLayout()
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color: {color}; font-size: 14px;")
-        dot.setFixedWidth(20)
-        lbl_name = QLabel(name)
-        lbl_name.setStyleSheet(f"font-weight: bold; color: {C['text']};")
-        lbl_name.setFixedWidth(110)
-        lbl_text = QLabel(text)
-        lbl_text.setWordWrap(True)
-        lbl_text.setStyleSheet(f"color: {C['body']};")
-        row.addWidget(dot)
-        row.addWidget(lbl_name)
-        row.addWidget(lbl_text, 1)
-        host = QWidget()
-        host.setLayout(row)
-        self._results.addWidget(host)
+        color = {"ok": "#2e7d32", "warn": "#e8930c", "fail": "#c62828"}.get(status, C["dim"])
+        label = QLabel(f"{name}：{text}")
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color: {color};")
+        self._results.addWidget(label)
 
-    def set_scan_actions(self, ports: list):
-        self.clear_actions()
-        if not ports:
-            return
-        lbl = QLabel("一键改用：")
-        lbl.setStyleSheet(f"color: {C['dim']}; font-size: 12px;")
-        self._actions.addWidget(lbl)
-        for p in ports[:3]:
-            btn = QPushButton(f"端口 {p}")
-            btn.setObjectName("primaryBtn")
-            btn.clicked.connect(lambda _c=False, port=p: self.on_apply_port and self.on_apply_port(port))
-            self._actions.addWidget(btn)
-        self._actions.addStretch(1)
-
-
-def _update_error_detail(exc: Exception) -> str:
-    """把检查更新的异常翻成一句人话，方便定位（证书/代理/超时/限流）。"""
-    if isinstance(exc, urllib.error.HTTPError):
-        return f"GitHub 返回 {exc.code}"
-    text = str(exc)
-    low = text.lower()
-    if "certificate" in low or "ssl" in low:
-        return "证书校验失败"
-    if "refused" in low or "10061" in text:
-        return "连不上代理（先确认代理工具开着）"
-    if "timed out" in low or "timeout" in low:
-        return "连接超时"
-    if "403" in text:
-        return "GitHub 返回 403（可能被限流）"
-    return text[:80] if text else "网络异常"
-
-
-def _make_opener(proxy_url: str | None):
-    handlers = []
-    if proxy_url:
-        handlers.append(
-            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-        )
-    else:
-        handlers.append(urllib.request.ProxyHandler({}))
-    ca = store.ca_bundle_path()
-    if ca is not None:
-        ctx = ssl.create_default_context(cafile=str(ca))
-        handlers.append(urllib.request.HTTPSHandler(context=ctx))
-    return urllib.request.build_opener(*handlers)
-
-
-def _pick_exe_asset(release: dict) -> tuple[str, int, str]:
-    """从 Release JSON 里挑 exe 资产，返回 (下载地址, 字节数, sha256摘要)。
-    跳过名字带 setup 的安装包资产，只认便携版主程序。"""
-    for asset in release.get("assets") or []:
-        name = str(asset.get("name") or "")
-        if not name.lower().endswith(".exe") or "setup" in name.lower():
-            continue
-        digest = str(asset.get("digest") or "")
-        sha = digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
-        return str(asset.get("browser_download_url") or ""), int(asset.get("size") or 0), sha
-    return "", 0, ""
-
-
-def build_updater_bat(src: Path, dst: Path) -> str:
-    """生成替换脚本：等旧 exe 退出后把新文件覆盖过去，再启动新版，最后自删。"""
-    lines = [
-        "@echo off",
-        "setlocal",
-        f'set "SRC={src}"',
-        f'set "DST={dst}"',
-        "for /L %%i in (1,1,40) do (",
-        '  copy /y "%SRC%" "%DST%" >nul 2>&1 && goto done',
-        "  timeout /t 1 /nobreak >nul",
-        ")",
-        ":done",
-        "timeout /t 2 /nobreak >nul",
-        'start "" "%DST%"',
-        'del "%SRC%" >nul 2>&1',
-        'del "%~f0"',
-    ]
-    return "\r\n".join(lines) + "\r\n"
-
-
-def build_rename_bat(new_exe: Path, old_exe: Path) -> str:
-    """生成换名更新脚本：新版已下载到旧 exe 同目录（新文件名），
-    等旧 exe 退出后删掉旧文件，稍等片刻再启动新版，最后自删。
-    延时启动是给杀毒软件留出扫描新文件的时间，免得首次启动解压被挡。"""
-    lines = [
-        "@echo off",
-        "setlocal",
-        f'set "NEW={new_exe}"',
-        f'set "OLD={old_exe}"',
-        "timeout /t 2 /nobreak >nul",
-        "for /L %%i in (1,1,40) do (",
-        '  del "%OLD%" >nul 2>&1 && goto startnew',
-        "  timeout /t 1 /nobreak >nul",
-        ")",
-        ":startnew",
-        "timeout /t 1 /nobreak >nul",
-        'start "" "%NEW%"',
-        'del "%~f0"',
-    ]
-    return "\r\n".join(lines) + "\r\n"
-
-
-class UpdateChecker(QThread):
-    """后台查 GitHub 最新 Release；走软件里配置的本地代理（关代理则直连）。
-
-    证书校验用随软件打包的 CA 包；先查 API，失败再退到网页版
-    /releases/latest 的跳转地址解析版本号（不受 API 限流影响）。
-    """
-
-    # 成功?, 最新 tag, 发布页地址, 失败原因, exe 下载地址, exe 字节数, exe sha256
-    done = pyqtSignal(bool, str, str, str, str, int, str)
-
-    def __init__(self, proxy_url: str | None, parent=None):
-        super().__init__(parent)
-        self.proxy_url = proxy_url
-
-    def run(self):
-        opener = _make_opener(self.proxy_url)
-        headers = {"User-Agent": "MuseChrome"}
-        try:
-            req = urllib.request.Request(LATEST_API, headers=headers)
-            with opener.open(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            tag = str(data.get("tag_name") or "")
-            if tag:
-                asset_url, size, sha = _pick_exe_asset(data)
-                self.done.emit(
-                    True, tag, str(data.get("html_url") or ""), "", asset_url, size, sha
-                )
-                return
-            raise RuntimeError("GitHub 没返回版本号")
-        except Exception as api_exc:
-            try:
-                req = urllib.request.Request(
-                    REPO_URL + "/releases/latest", headers=headers
-                )
-                with opener.open(req, timeout=10) as resp:
-                    final_url = resp.geturl()
-                m = re.search(r"/tag/([^/?#]+)", final_url)
-                if m:
-                    tag = m.group(1)
-                    asset_url = f"{REPO_URL}/releases/download/{tag}/MuseChrome-{tag}.exe"
-                    self.done.emit(True, tag, final_url, "", asset_url, 0, "")
-                    return
-                raise RuntimeError("没解析出版本号")
-            except Exception:
-                self.done.emit(False, "", "", _update_error_detail(api_exc), "", 0, "")
-
-
-class DownloadThread(QThread):
-    """后台下载新版 exe：走本地代理，带进度；下完校验大小和 sha256（有值才验）。"""
-
-    progress = pyqtSignal(int)  # 0-100，不知总长时发 -1
-    done = pyqtSignal(bool, str, str)  # 成功?, 保存路径, 失败原因
-
-    def __init__(self, url: str, dest: Path, proxy_url: str | None,
-                 expect_size: int = 0, expect_sha: str = "", parent=None):
-        super().__init__(parent)
-        self.url = url
-        self.dest = dest
-        self.proxy_url = proxy_url
-        self.expect_size = expect_size
-        self.expect_sha = expect_sha
-
-    def run(self):
-        import hashlib
-
-        part = self.dest.with_suffix(self.dest.suffix + ".part")
-        try:
-            self.dest.parent.mkdir(parents=True, exist_ok=True)
-            opener = _make_opener(self.proxy_url)
-            req = urllib.request.Request(self.url, headers={"User-Agent": "MuseChrome"})
-            h = hashlib.sha256()
-            got = 0
-            with opener.open(req, timeout=30) as resp, open(part, "wb") as f:
-                total = int(resp.headers.get("Content-Length") or 0) or self.expect_size
-                while True:
-                    if self.isInterruptionRequested():
-                        f.close()
-                        part.unlink(missing_ok=True)
-                        self.done.emit(False, "", "已取消")
-                        return
-                    chunk = resp.read(262144)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    h.update(chunk)
-                    got += len(chunk)
-                    self.progress.emit(int(got * 100 / total) if total else -1)
-            if self.expect_size and got != self.expect_size:
-                part.unlink(missing_ok=True)
-                self.done.emit(False, "", f"下载不完整（{got}/{self.expect_size} 字节）")
-                return
-            if self.expect_sha and h.hexdigest().lower() != self.expect_sha.lower():
-                part.unlink(missing_ok=True)
-                self.done.emit(False, "", "下载文件校验失败，已丢弃")
-                return
-            part.replace(self.dest)
-            self.done.emit(True, str(self.dest), "")
-        except Exception as exc:
-            part.unlink(missing_ok=True)
-            self.done.emit(False, "", _update_error_detail(exc))
 
 PALETTES = {
     "light": {
@@ -717,16 +275,11 @@ def _paint_bg(widget: QWidget) -> None:
     widget.setAutoFillBackground(True)
 
 NOTE_TEXT = """使用说明：
-• 点「打开」→ 弹出这个账号自己的浏览器窗口（第一次是全新浏览器，登录一次 Muse 即可，之后免登录）。
-• 每个账号的登录、Cookie、插件都存在它自己的目录里，账号之间完全隔离。
-• 每个账号可以在卡片上单独选浏览器：谷歌 Chrome 或微软 Edge，哪个账号用哪个互不影响；两个浏览器各用各的配置目录，第一次用某个浏览器打开某账号时要登录一次。
-• 代理在打开时通过启动参数带给浏览器（本地代理默认 127.0.0.1:10808；也可以在设置里选跟随系统代理，或开了 TUN 时选直连）；打开前先确认你的代理工具开着。打不开先去左侧「环境自检」查一遍。
-• 插件要每个账号装一次：点账号卡片上的「插件助手」，把你日常 Chrome 的插件清单读出来，逐个打开商店页点「添加」即可，装好就一直都在。
-• 账号多了不用一个个点：右上角「打开全部」会把没打开的账号排队逐个打开；卡片上的「编辑」可以给账号写备注、选颜色标记，靠备注和颜色认号。
-• 左侧边栏下方的月亮按钮能一键切换深浅外观；环境自检会顺带显示代理延迟。
-• 同一个账号重复点「打开」不会开两个号，只会再给它开一个窗口。
-• 代理/语言这类参数只在浏览器第一次打开时生效；改了设置，先把该账号的浏览器窗口全关掉再打开。"""
-
+• 点「打开」启动该账号独立的 Chrome / Edge；首次使用需自行登录，后续保留本账号的浏览器数据。
+• Chrome 与 Edge 的配置目录分开。Edge 的微软登录和同步行为可能随版本、策略变化；首次打开请自行确认登录与同步状态。
+• 选 Edge 后可点「复制邮箱并打开取件链接」，选择 CSV 邮箱、自行取验证码，再回账号窗口完成登录。
+• 打开前确认代理已就绪；全局代理可在左侧「代理检测」测试，按账号代理需单独确认。
+• 改浏览器、代理或语言设置前，先关闭该账号的浏览器；外观可从左侧切换。"""
 
 class SettingsPage(QWidget):
     """设置页：在主区里切换显示，不再是独立弹窗。"""
@@ -825,12 +378,11 @@ class SettingsPage(QWidget):
         note.setStyleSheet(f"color: {C['dim']}; font-size: 12px;")
 
         self.btn_export = QPushButton("导出备份")
-        self.btn_import = QPushButton("导入恢复")
-        backup_note = QLabel("换电脑/重装时用：导出一个 zip，另一台导入即可。完整备份含登录态，别外传。")
+        backup_note = QLabel("仅提供导出，导入恢复暂不可用。完整备份前关闭所有账号浏览器；备份含敏感登录数据，不保证跨电脑恢复登录态。")
+        backup_note.setWordWrap(True)
         backup_note.setStyleSheet(f"color: {C['dim']}; font-size: 12px;")
         backup_row = QHBoxLayout()
         backup_row.addWidget(self.btn_export)
-        backup_row.addWidget(self.btn_import)
         backup_row.addWidget(backup_note)
         backup_row.addStretch(1)
 
@@ -936,80 +488,13 @@ class SettingsPage(QWidget):
             self.mail_path_selected.emit("mail_config_path", path)
 
 
-class PluginPage(QWidget):
-    """插件助手页：列出日常 Chrome 的插件，勾选后在账号 Chrome 里逐个打开商店页。"""
+ABOUT_TEXT = """Muse 账号管理器 · 精简二开版
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        title = QLabel("插件助手")
-        title.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {C['text']};")
-        self.lbl_target = QLabel("")
-        self.lbl_target.setStyleSheet(f"color: {C['dim']};")
+为每个账号准备独立的 Chrome / Edge 配置目录，保留账号管理、代理设置和邮箱辅助。浏览器由本机提供，程序不内置浏览器或自动化运行时。
 
-        intro = QLabel(
-            "下面是你日常 Chrome 里装的插件。勾好后点「打开商店页安装」，"
-            "我会在这个账号选定的浏览器里把它们的商店页一个个打开，你逐页点「添加」就行。\n"
-            "SwitchyOmega 已自动取消勾选：代理由管理器接管，装它反而可能抢代理设置。"
-        )
-        intro.setWordWrap(True)
-        self.list = QListWidget()
-        self.lbl_empty = QLabel(
-            "没在你的日常 Chrome 里读到插件清单。\n"
-            "（日常 Chrome 装在默认位置才读得到；也可以在账号的 Chrome 里直接去应用商店装。）"
-        )
-        self.lbl_empty.setWordWrap(True)
-        self.btn_go = QPushButton("打开商店页安装")
-        self.btn_go.setObjectName("primaryBtn")
-        self.btn_back = QPushButton("返回账号列表")
-        row = QHBoxLayout()
-        row.addWidget(self.btn_go)
-        row.addWidget(self.btn_back)
-        row.addStretch(1)
+邮箱辅助只读取 CSV 的邮箱列，把选中的邮箱复制到剪贴板，并交给默认浏览器打开取件链接；验证码和网站登录由你完成。
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 16)
-        layout.setSpacing(10)
-        layout.addWidget(title)
-        layout.addWidget(self.lbl_target)
-        layout.addWidget(intro)
-        layout.addWidget(self.lbl_empty)
-        layout.addWidget(self.list, 1)
-        layout.addLayout(row)
-
-    def refresh(self, account_name: str, exts: list[dict]):
-        self.lbl_target.setText(f"给账号「{account_name}」安装插件：")
-        self.list.clear()
-        for ext in exts:
-            item = QListWidgetItem(f"{ext['name']}")
-            item.setForeground(QBrush(QColor(C["text"])))
-            item.setData(Qt.ItemDataRole.UserRole, ext["id"])
-            low = ext["name"].lower()
-            skip = "switchyomega" in low or "zeroomega" in low
-            item.setCheckState(
-                Qt.CheckState.Unchecked if skip else Qt.CheckState.Checked
-            )
-            self.list.addItem(item)
-        has = bool(exts)
-        self.list.setVisible(has)
-        self.lbl_empty.setVisible(not has)
-        self.btn_go.setEnabled(has)
-
-    def selected_ids(self) -> list[str]:
-        out = []
-        for i in range(self.list.count()):
-            item = self.list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                out.append(str(item.data(Qt.ItemDataRole.UserRole)))
-        return out
-
-
-ABOUT_TEXT = """Muse 账号管理器
-
-给每个 Muse 账号准备一个完全独立的浏览器配置目录，点「打开」就用你电脑上的真 Chrome 或 Edge 启动它（每个账号可以在卡片上单独选）：独立的登录状态、Cookie、插件和浏览数据，账号之间互不串号。
-
-打开时自动带上本地代理（默认 127.0.0.1:10808）、WebRTC 防泄漏和英文语言标识，指纹就是原装浏览器本人。管理器本身不含浏览器、不联网、不收集任何数据；所有账号数据只存在软件旁边的 MuseChromeData 文件夹里。
-
-「插件助手」可以读出你日常 Chrome 的插件清单，在账号的浏览器里逐个打开商店页，点「添加」即装好同款插件。"""
+数据位于软件旁的 MuseChromeData 文件夹。代理检测仅在手动点击后请求测试页；已移除公告、插件助手及软件内更新，新版需手动获取。"""
 
 DISCLAIMER_TEXT = """1. 永久免费，认准官方渠道：本软件永久免费、开源发布（MIT 许可），官方版本不含病毒和恶意代码。请只从官方 GitHub 仓库的 Releases 页面下载；任何收费出售本软件的都是骗局，从非官方渠道下载的版本可能被篡改或捆绑恶意程序，由此造成的损失作者概不负责。
 
@@ -1069,156 +554,6 @@ class AboutPage(QWidget):
         layout.addWidget(disc)
         layout.addLayout(row)
         layout.addStretch(1)
-
-
-class NoticeImageFetcher(QThread):
-    """后台把公告图片下载到本地缓存，下好一张报一张，页面随即补上。"""
-
-    got = pyqtSignal(str)  # 图片地址（其本地缓存已就位）
-
-    def __init__(self, urls: list[str], proxy_url: str | None, parent=None):
-        super().__init__(parent)
-        self.urls = urls
-        self.proxy_url = proxy_url
-
-    def run(self):
-        for url in self.urls:
-            path = store.notice_image_path(url)
-            if path.exists() and path.stat().st_size > 0:
-                continue
-            try:
-                opener = _make_opener(self.proxy_url)
-                req = urllib.request.Request(url, headers={"User-Agent": "MuseChrome"})
-                with opener.open(req, timeout=15) as resp:
-                    data = resp.read()
-                if not data or len(data) > 8_000_000:  # 空图、超大图都不收
-                    continue
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-                self.got.emit(url)
-            except Exception:
-                continue
-
-
-class NoticePage(QWidget):
-    """公告页：内容来自仓库里的公告文件，拉不到时显示上次缓存。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._proxy_url: str | None = None
-        self._notices: list[dict] = []
-        self._img_fetch: NoticeImageFetcher | None = None
-        title = QLabel("公告")
-        title.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {C['text']};")
-        self.lbl_status = QLabel("")
-        self.lbl_status.setStyleSheet(f"font-size: 12px; color: {C['dim']};")
-        head = QHBoxLayout()
-        head.addWidget(title)
-        head.addStretch(1)
-        head.addWidget(self.lbl_status)
-
-        self._host = QWidget()
-        _paint_bg(self._host)
-        self._box = QVBoxLayout(self._host)
-        self._box.setContentsMargins(2, 2, 2, 2)
-        self._box.setSpacing(12)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._host)
-        _paint_bg(scroll.viewport())
-
-        self.btn_back = QPushButton("返回账号列表")
-        row = QHBoxLayout()
-        row.addWidget(self.btn_back)
-        row.addStretch(1)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 16)
-        layout.setSpacing(12)
-        layout.addLayout(head)
-        layout.addWidget(scroll, 1)
-        layout.addLayout(row)
-        self.set_notices([], "")
-
-    def set_proxy_url(self, url: str | None):
-        self._proxy_url = url
-
-    def set_notices(self, notices: list[dict], status: str):
-        self._notices = notices
-        self.lbl_status.setText(status)
-        while self._box.count():
-            item = self._box.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)  # 只 deleteLater 时旧控件会残留在页面上（公告页真出过）
-                w.deleteLater()
-        if not notices:
-            lbl = QLabel("暂无公告")
-            lbl.setStyleSheet(f"font-size: 14px; color: {C['dim']};")
-            self._box.addWidget(lbl)
-        for n in notices:
-            self._box.addWidget(self._make_card(n))
-        if notices:
-            end = QLabel("— 没有更多公告了 —")
-            end.setStyleSheet(f"font-size: 12px; color: {C['dim']};")
-            end.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._box.addWidget(end)
-        self._box.addStretch(1)
-        # 公告图片：本地还没有的，后台下载，下好一张就重排一次补上
-        missing = []
-        for n in notices:
-            for url in n.get("images") or []:
-                p = store.notice_image_path(url)
-                if not (p.exists() and p.stat().st_size > 0):
-                    missing.append(url)
-        if missing:
-            if self._img_fetch is not None and self._img_fetch.isRunning():
-                self._img_fetch.got.disconnect(self._on_image_ready)
-            self._img_fetch = NoticeImageFetcher(missing, self._proxy_url, self)
-            self._img_fetch.got.connect(self._on_image_ready)
-            self._img_fetch.start()
-
-    def _on_image_ready(self, _url: str):
-        self.set_notices(self._notices, self.lbl_status.text())
-
-    @staticmethod
-    def _make_card(n: dict) -> QFrame:
-        card = QFrame()
-        card.setStyleSheet(
-            f"QFrame {{ background: {C['surface']}; border: 1px solid {C['border']}; border-radius: 10px; }}"
-            "QLabel { border: none; background: transparent; }"
-        )
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(18, 16, 18, 16)
-        cl.setSpacing(8)
-        ct = QLabel(n["title"])
-        ct.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {C['text']};")
-        ct.setWordWrap(True)
-        cl.addWidget(ct)
-        if n["date"]:
-            cd = QLabel(n["date"])
-            cd.setStyleSheet(f"font-size: 12px; color: {C['dim']};")
-            cl.addWidget(cd)
-        if n["body"]:
-            cb = QLabel(n["body"])
-            cb.setWordWrap(True)
-            cb.setStyleSheet(f"color: {C['body']};")
-            cl.addWidget(cb)
-        for url in n.get("images") or []:
-            path = store.notice_image_path(url)
-            lbl = QLabel()
-            pix = QPixmap(str(path)) if path.exists() and path.stat().st_size > 0 else QPixmap()
-            if not pix.isNull():
-                if pix.width() > 560:
-                    pix = pix.scaledToWidth(560, Qt.TransformationMode.SmoothTransformation)
-                lbl.setPixmap(pix)
-                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            else:
-                lbl.setText("图片加载中…")
-                lbl.setStyleSheet(f"font-size: 12px; color: {C['dim']};")
-                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cl.addWidget(lbl)
-        return card
 
 
 class AccountCard(QFrame):
@@ -1308,54 +643,22 @@ ACCOUNT_COLORS = ["", "#e74c3c", "#e67e22", "#f1c40f", "#27ae60", "#2980b9", "#8
 
 
 class AccountEditDialog(QDialog):
-    """编辑账号：名字、备注、颜色标记（卡片头像的底色，账号多了靠颜色认）。"""
-
+    """Edit only the account label; keep legacy metadata in storage."""
     def __init__(self, acc: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"编辑账号 · {acc['name']}")
-        self.setMinimumWidth(380)
-        self.edt_name = QLineEdit(acc["name"])
-        self.edt_note = QLineEdit(str(acc.get("note") or ""))
-        self.edt_note.setPlaceholderText("备注（选填）：比如「主号」「备用」")
-        self._color = str(acc.get("color") or "")
-        color_row = QHBoxLayout()
-        self._swatches: list[QPushButton] = []
-        for col in ACCOUNT_COLORS:
-            btn = QPushButton("无" if not col else "")
-            btn.setCheckable(True)
-            btn.setFixedSize(30, 30)
-            if col:
-                btn.setStyleSheet(
-                    f"QPushButton {{ background: {col}; border: 2px solid transparent; border-radius: 15px; }}"
-                    f"QPushButton:checked {{ border: 2px solid {C['text']}; }}"
-                )
-            else:
-                btn.setStyleSheet("font-size: 11px; border-radius: 15px; padding: 0;")
-            btn.setChecked(col == self._color)
-            btn.clicked.connect(lambda _c=False, v=col: self._pick_color(v))
-            self._swatches.append(btn)
-            color_row.addWidget(btn)
-        color_row.addStretch(1)
+        self.setWindowTitle("编辑账号名称")
+        self.edt_name = QLineEdit(str(acc["name"]))
         form = QFormLayout()
-        form.addRow("名字", self.edt_name)
-        form.addRow("备注", self.edt_note)
-        form.addRow("颜色标记", color_row)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
+        form.addRow("名称", self.edt_name)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
 
-    def _pick_color(self, value: str):
-        self._color = value
-        for btn, col in zip(self._swatches, ACCOUNT_COLORS):
-            btn.setChecked(col == value)
-
-    def result_values(self) -> tuple[str, str, str]:
-        return self.edt_name.text().strip(), self.edt_note.text().strip(), self._color
+    def result_name(self) -> str:
+        return self.edt_name.text().strip()
 
 
 def _close_windows_for_pid(pid: int) -> int:
@@ -1401,12 +704,6 @@ class MainWindow(QMainWindow):
         self._launched: set[str] = set()
         self._launched_at: dict[str, float] = {}
         self._card_widgets: dict[str, QWidget] = {}
-        self._cards_animated = False
-        self._anims: list = []
-        self._open_queue: list[str] = []
-        self._open_total = 0
-        self._open_timer = QTimer(self)
-        self._open_timer.timeout.connect(self._open_next)
         self._procs: dict[str, subprocess.Popen] = {}
         # 每 2.5 秒看一眼已启动的 Chrome 主进程：退出了就把卡片状态改回「未打开」
         self._proc_timer = QTimer(self)
@@ -1438,31 +735,20 @@ class MainWindow(QMainWindow):
         lbl_ver.setStyleSheet("font-size: 12px; color: #a89e8f;")
         sl.addWidget(lbl_ver)
         sl.addSpacing(14)
-        self.btn_nav_notice = QPushButton("📢 公告")
-        self.btn_nav_notice.clicked.connect(self.show_notice_page)
-        sl.addWidget(self.btn_nav_notice)
         self.btn_nav_home = QPushButton("账号列表")
         self.btn_nav_home.clicked.connect(lambda: self._show_page(0))
         sl.addWidget(self.btn_nav_home)
-        self.btn_nav_plugins = QPushButton("插件助手")
-        self.btn_nav_plugins.clicked.connect(self.show_plugins_page)
-        sl.addWidget(self.btn_nav_plugins)
         self.btn_nav_settings = QPushButton("设置")
         self.btn_nav_settings.clicked.connect(self.show_settings_page)
         sl.addWidget(self.btn_nav_settings)
-        self.btn_nav_health = QPushButton("环境自检")
-        self.btn_nav_health.clicked.connect(lambda: self._show_page(4))
+        self.btn_nav_health = QPushButton("代理检测")
+        self.btn_nav_health.clicked.connect(lambda: self._show_page(2))
         sl.addWidget(self.btn_nav_health)
-        self.btn_update = QPushButton("检查更新")
-        self.btn_update.setObjectName("navBtn")
-        self.btn_update.clicked.connect(self.check_update)
-        sl.addWidget(self.btn_update)
         self.btn_nav_about = QPushButton("关于软件")
         self.btn_nav_about.clicked.connect(self.show_about_page)
         sl.addWidget(self.btn_nav_about)
         self._nav_btns = [
-            self.btn_nav_home, self.btn_nav_notice, self.btn_nav_plugins,
-            self.btn_nav_settings, self.btn_nav_health, self.btn_nav_about,
+            self.btn_nav_home, self.btn_nav_settings, self.btn_nav_health, self.btn_nav_about,
         ]
         sl.addStretch(1)
         self.btn_theme = QPushButton()
@@ -1482,9 +768,6 @@ class MainWindow(QMainWindow):
         lbl_head.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {C['text']};")
         head.addWidget(lbl_head)
         head.addStretch(1)
-        self.btn_open_all = QPushButton("打开全部")
-        self.btn_open_all.clicked.connect(self.open_all_accounts)
-        head.addWidget(self.btn_open_all)
         btn_add = QPushButton("＋ 添加账号")
         btn_add.setObjectName("primaryBtn")
         btn_add.clicked.connect(self.add_account)
@@ -1492,9 +775,9 @@ class MainWindow(QMainWindow):
         lbl_sub = QLabel("每个账号一个独立浏览器配置，登录一次，点开即用，互不串号。")
         lbl_sub.setStyleSheet(f"color: {C['dim']};")
 
-        notice = QFrame()
-        notice.setObjectName("noticeBar")
-        nl = QHBoxLayout(notice)
+        prep_note = QFrame()
+        prep_note.setObjectName("noticeBar")
+        nl = QHBoxLayout(prep_note)
         nl.setContentsMargins(14, 9, 14, 9)
         lbl_notice = QLabel(
             "使用前准备：本机装有谷歌 Chrome 或微软 Edge 任一浏览器即可——本软件用你电脑上现成的浏览器打开账号，不自带浏览器；代理请提前开好。"
@@ -1525,37 +808,27 @@ class MainWindow(QMainWindow):
         main.setSpacing(10)
         main.addLayout(head)
         main.addWidget(lbl_sub)
-        main.addWidget(notice)
+        main.addWidget(prep_note)
         main.addWidget(scroll, 1)
         main.addWidget(lbl_note)
         accounts_page = QWidget()
         accounts_page.setLayout(main)
         _paint_bg(accounts_page)
 
-        # ---- 页面切换：账号列表 / 公告 / 插件助手 / 设置 / 关于，边栏只亮当前页 ----
-        self.page_notice = NoticePage()
-        self.page_notice.btn_back.clicked.connect(lambda: self._show_page(0))
-        self.page_plugins = PluginPage()
-        self.page_plugins.btn_go.clicked.connect(self.install_selected_plugins)
-        self.page_plugins.btn_back.clicked.connect(lambda: self._show_page(0))
+        # ---- 页面切换：账号列表 / 设置 / 代理检测 / 关于 ----
         self.page_settings = SettingsPage()
         self.page_settings.mail_path_selected.connect(self.save_mail_path)
         self.page_settings.btn_save.clicked.connect(self.save_settings)
         self.page_settings.btn_back.clicked.connect(lambda: self._show_page(0))
         self.page_settings.btn_export.clicked.connect(self.export_backup)
-        self.page_settings.btn_import.clicked.connect(self.import_backup)
         self.page_health = HealthPage()
         self.page_health.btn_back.clicked.connect(lambda: self._show_page(0))
         self.page_health.btn_start.clicked.connect(self.start_health_check)
-        self.page_health.btn_leak.clicked.connect(self.open_leak_page)
-        self.page_health.on_apply_port = self.apply_scanned_port
         self.page_about = AboutPage()
         self.page_about.btn_back.clicked.connect(lambda: self._show_page(0))
         self.stack = QStackedWidget()
         _paint_bg(self.stack)
         self.stack.addWidget(accounts_page)
-        self.stack.addWidget(self.page_notice)
-        self.stack.addWidget(self.page_plugins)
         self.stack.addWidget(self.page_settings)
         self.stack.addWidget(self.page_health)
         self.stack.addWidget(self.page_about)
@@ -1574,16 +847,6 @@ class MainWindow(QMainWindow):
         self._rebuild_cards()
         self._show_page(0)
 
-        # ---- 公告：先摆上次缓存，再后台拉最新 ----
-        self._notices: list[dict] = []
-        self._notice_fetch: NoticeFetcher | None = None
-        cache = store.load_notices_cache()
-        if cache["text"]:
-            self._notices = parse_notices(cache["text"])
-            self.page_notice.set_notices(self._notices, "正在更新…")
-        self._refresh_notice_badge()
-        self._fetch_notices()
-
     # ---------- 页面切换 ----------
     def _show_page(self, idx: int):
         """切到第 idx 页，边栏只有对应按钮亮橙，其余恢复常态（同一时刻只亮一个）。"""
@@ -1597,58 +860,16 @@ class MainWindow(QMainWindow):
         if idx == 0:
             self._cards_scroll.verticalScrollBar().setValue(0)
 
-    def show_notice_page(self):
-        self._show_page(1)
-        if self._notices:
-            self.cfg["notice_seen"] = self._notices[0]["id"]
-            store.save_config(self.cfg)
-            self._refresh_notice_badge()
-        self._fetch_notices()
-
-    # ---------- 公告 ----------
-    def _fetch_notices(self):
-        if self._notice_fetch is not None and self._notice_fetch.isRunning():
-            return
-        self.page_notice.set_proxy_url(store.fetch_proxy_url(self.cfg))
-        self._notice_fetch = NoticeFetcher(store.fetch_proxy_url(self.cfg), self)
-        self._notice_fetch.done.connect(self._on_notices_fetched)
-        self._notice_fetch.start()
-
-    def _on_notices_fetched(self, ok: bool, text: str, why: str):
-        if ok:
-            stamp = time.strftime("%Y-%m-%d %H:%M")
-            store.save_notices_cache(text, stamp)
-            self._notices = parse_notices(text)
-            self.page_notice.set_notices(self._notices, f"更新于 {stamp}")
-        elif self._notices:
-            self.page_notice.set_notices(
-                self._notices, f"暂时拉不到公告（{why}），显示的是上次内容"
-            )
-        else:
-            self.page_notice.set_notices([], f"暂时拉不到公告（{why}）")
-        self._refresh_notice_badge()
-
-    def _refresh_notice_badge(self):
-        newest = self._notices[0]["id"] if self._notices else ""
-        has_new = bool(newest) and newest != str(self.cfg.get("notice_seen") or "")
-        self.btn_nav_notice.setText("📢 公告（新）" if has_new else "📢 公告")
-
-    def show_plugins_page(self):
-        acc = self._current_account()
-        if acc is None:
-            return
-        self.page_plugins.refresh(acc["name"], store.list_source_extensions())
-        self._show_page(2)
 
     def show_settings_page(self):
-        if self.stack.currentIndex() != 3:
+        if self.stack.currentIndex() != 1:
             self.page_settings.load(self.cfg)
-        self._show_page(3)
+        self._show_page(1)
 
     def show_about_page(self):
-        self._show_page(5)
+        self._show_page(3)
 
-    # ---------- 环境自检 ----------
+    # ---------- 代理检测 ----------
     def start_health_check(self):
         if getattr(self, "_health", None) is not None and self._health.isRunning():
             return
@@ -1657,29 +878,13 @@ class MainWindow(QMainWindow):
         self.page_health.btn_start.setText("检测中…")
         self._health = HealthChecker(self.cfg, self)
         self._health.item.connect(self.page_health.add_result)
-        self._health.scan_found.connect(self.page_health.set_scan_actions)
-        self._health.all_done.connect(self._on_health_done)
+        self._health.finished.connect(self._on_health_done)
         self._health.start()
 
     def _on_health_done(self):
         self.page_health.btn_start.setEnabled(True)
         self.page_health.btn_start.setText("开始检测")
 
-    def apply_scanned_port(self, port: int):
-        self.cfg["proxy_mode"] = "local"
-        self.cfg["proxy_enabled"] = True
-        self.cfg["proxy_type"] = "http"
-        self.cfg["proxy_host"] = "127.0.0.1"
-        self.cfg["proxy_port"] = int(port)
-        store.save_config(self.cfg)
-        self._refresh_proxy_label()
-        QMessageBox.information(
-            self, "环境自检", f"已改用 127.0.0.1:{port} 作为代理。\n回账号列表打开账号试试。"
-        )
-
-    def open_leak_page(self):
-        self.open_account(extra_urls=["https://browserleaks.com/ip"])
-        self._show_page(0)
 
     # ---------- 账号卡片 ----------
     def _rebuild_cards(self):
@@ -1695,51 +900,10 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
         self._card_widgets = {}
-        cards = []
         for idx, acc in enumerate(self.accounts):
             card = self._make_card(acc)
             self._card_widgets[acc["id"]] = card
-            cards.append(card)
             self._cards_grid.addWidget(card, idx // 3, idx % 3)
-        # 只在软件刚打开、第一次摆卡片时做一次错落淡入，之后重排不再动
-        if not self._cards_animated:
-            self._cards_animated = True
-            for i, card in enumerate(cards):
-                self._fade_in_card(card, i * 45)
-
-    def _fade_in_card(self, card: QWidget, delay_ms: int):
-        eff = QGraphicsOpacityEffect(card)
-        eff.setOpacity(0.0)
-        card.setGraphicsEffect(eff)
-        anim = QPropertyAnimation(eff, b"opacity", card)
-        anim.setDuration(280)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anims.append(anim)
-        anim.finished.connect(lambda c=card: c.setGraphicsEffect(None))
-        if delay_ms:
-            QTimer.singleShot(delay_ms, anim.start)
-        else:
-            anim.start()
-
-    def _pulse_card(self, acc_id: str):
-        """批量打开时给刚启动的卡片一个呼吸脉冲，眼睛能跟上进度。"""
-        card = self._card_widgets.get(acc_id)
-        if card is None:
-            return
-        eff = QGraphicsOpacityEffect(card)
-        card.setGraphicsEffect(eff)
-        anim = QPropertyAnimation(eff, b"opacity", card)
-        anim.setDuration(550)
-        anim.setKeyValueAt(0, 0.3)
-        anim.setKeyValueAt(0.35, 1.0)
-        anim.setKeyValueAt(1, 1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anims.append(anim)
-        anim.finished.connect(lambda c=card: c.setGraphicsEffect(None))
-        anim.start()
-
     def _make_card(self, acc: dict) -> AccountCard:
         selected = acc["id"] == self._selected_id
         card = AccountCard(acc["id"])
@@ -1753,7 +917,7 @@ class MainWindow(QMainWindow):
         avatar.setFixedSize(40, 40)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setStyleSheet(
-            f"background: {acc.get('color') or '#e8930c'}; color: #ffffff; font-size: 17px; font-weight: bold; border-radius: 20px;"
+            "background: #e8930c; color: #ffffff; font-size: 17px; font-weight: bold; border-radius: 20px;"
         )
         cl.addWidget(avatar)
         name = QLabel(acc["name"])
@@ -1782,12 +946,6 @@ class MainWindow(QMainWindow):
         lbl_status = QLabel(f"独立配置 · {status}{proxy_hint}")
         lbl_status.setStyleSheet(f"font-size: 12px; color: {C['dim']};")
         cl.addWidget(lbl_status)
-        note_text = str(acc.get("note") or "").strip()
-        if note_text:
-            lbl_note = QLabel(note_text)
-            lbl_note.setStyleSheet(f"font-size: 12px; color: {C['dim']};")
-            lbl_note.setWordWrap(True)
-            cl.addWidget(lbl_note)
         # 浏览器二选一：分段开关（选中的一段填墨色），比下拉框直观
         seg = QFrame()
         seg.setObjectName("browserSeg")
@@ -1826,9 +984,6 @@ class MainWindow(QMainWindow):
             bc=btn_seg_chrome, be=btn_seg_edge:
             self._set_account_browser(aid, "edge", bo, ba, bc, be)
         )
-        btn_plugins = QPushButton("插件助手")
-        btn_plugins.clicked.connect(lambda _c=False, aid=acc["id"]: (self._select_account(aid), self.show_plugins_page()))
-        cl.addWidget(btn_plugins)
         row = QHBoxLayout()
         btn_rename = QPushButton("编辑")
         btn_rename.setObjectName("miniBtn")
@@ -1884,16 +1039,7 @@ class MainWindow(QMainWindow):
         self.btn_theme.setText("☀️ 浅色外观" if dark else "🌙 深色外观")
 
     def toggle_theme(self):
-        """边栏月亮按钮：一键切换深浅外观。
-
-        界面的颜色是建窗口时按主题定的。早期做法是同进程里关旧窗口开新窗口，
-        但新窗口的后台线程（公告拉取等）还没跑完就被下一次切换连窗口销毁，
-        会闪退；修过一版（防连点＋等线程收尾）在个别机器上仍崩。
-        现在改成进程级重启：存好设置和窗口位置，拉起一个新进程，当前进程
-        正常退出——和用户手动关掉重开完全一样，不存在窗口/线程生命周期问题。
-        连点由 2 秒锁挡住，只认第一次。
-        已经打开的浏览器窗口不受影响。
-        """
+        """重启进程应用新主题，已打开的浏览器窗口不受影响。"""
         now = time.time()
         if now - MainWindow._last_theme_switch < 2.0:
             return
@@ -1947,40 +1093,13 @@ class MainWindow(QMainWindow):
         dlg = AccountEditDialog(acc, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        name, note, color = dlg.result_values()
-        if name:
-            acc["name"] = name
-        acc["note"] = note
-        acc["color"] = color
+        name = dlg.result_name()
+        if not name:
+            return
+        acc["name"] = name
         store.save_accounts(self.accounts)
         self._rebuild_cards()
 
-    def open_all_accounts(self):
-        """批量打开：还没打开的账号排队，每 0.7 秒开一个（一起涌会把机器压住），
-        按钮上滚动进度，刚开的卡片脉冲一下，眼睛跟得上。"""
-        pending = [a["id"] for a in self.accounts if a["id"] not in self._launched]
-        if not pending:
-            QMessageBox.information(self, "打开全部", "所有账号都已经打开了。")
-            return
-        self._open_queue = pending
-        self._open_total = len(pending)
-        self.btn_open_all.setEnabled(False)
-        self.btn_open_all.setText(f"正在打开…（0/{self._open_total}）")
-        self._open_timer.start(700)
-        self._open_next()
-
-    def _open_next(self):
-        if not self._open_queue:
-            self._open_timer.stop()
-            self.btn_open_all.setEnabled(True)
-            self.btn_open_all.setText("打开全部")
-            return
-        aid = self._open_queue.pop(0)
-        done = self._open_total - len(self._open_queue)
-        self.btn_open_all.setText(f"正在打开…（{done}/{self._open_total}）")
-        self._selected_id = aid
-        self.open_account()
-        self._pulse_card(aid)
 
     def edit_account_proxy(self):
         acc = self._current_account()
@@ -2018,14 +1137,6 @@ class MainWindow(QMainWindow):
             self._selected_id = self.accounts[0]["id"]
         self._rebuild_cards()
 
-    # ---------- 插件助手 ----------
-    def install_selected_plugins(self):
-        ids = self.page_plugins.selected_ids()
-        if not ids:
-            QMessageBox.information(self, "插件助手", "先勾选要安装的插件。")
-            return
-        self.open_account(extra_urls=[store.store_url(i) for i in ids])
-        self._show_page(0)
 
     # ---------- 打开浏览器 ----------
     def start_mail_assist(self, acc_id: str):
@@ -2062,7 +1173,7 @@ class MainWindow(QMainWindow):
             "邮箱已复制，取件链接已在默认浏览器中打开。请自行查收验证码，再到账号的 Edge 窗口完成登录。",
         )
 
-    def open_account(self, extra_urls: list[str] | None = None):
+    def open_account(self):
         acc = self._current_account()
         if acc is None:
             return
@@ -2088,7 +1199,7 @@ class MainWindow(QMainWindow):
                 return
         profile = store.profile_dir_for_browser(acc["id"], kind)
         args = [exe, *store.build_chrome_args(
-            store.effective_cfg(self.cfg, acc), profile, extra_urls, browser=kind
+            store.effective_cfg(self.cfg, acc), profile, browser=kind
         )]
         try:
             kwargs = {}
@@ -2140,121 +1251,6 @@ class MainWindow(QMainWindow):
         if changed:
             self._rebuild_cards()
 
-    # ---------- 检查更新 / 软件内更新 ----------
-    def check_update(self):
-        self.btn_update.setEnabled(False)
-        self.btn_update.setText("检查中…")
-        self._checker = UpdateChecker(store.fetch_proxy_url(self.cfg), self)
-        self._checker.done.connect(self._on_update_result)
-        self._checker.start()
-
-    def _restore_update_btn(self):
-        self.btn_update.setEnabled(True)
-        self.btn_update.setText("检查更新")
-
-    def _on_update_result(self, ok: bool, tag: str, url: str, detail: str,
-                          asset_url: str, size: int, sha: str):
-        self._restore_update_btn()
-        if not ok or not tag:
-            QMessageBox.information(
-                self, "检查更新",
-                f"检查失败：{detail or '连不上 GitHub'}。\n（先确认代理工具开着、软件里的代理设置没关，再试一次。）",
-            )
-            return
-        if not store.is_newer(tag, __version__):
-            QMessageBox.information(
-                self, "检查更新", f"已是最新版本（v{__version__}）。"
-            )
-            return
-        frozen = bool(getattr(sys, "frozen", False))
-        box = QMessageBox(self)
-        box.setWindowTitle("检查更新")
-        if frozen and asset_url:
-            box.setText(
-                f"发现新版本 {tag}（你现在是 v{__version__}）。\n"
-                "点「立即更新」直接在软件里下载，下载完自动替换成新版并重新打开，不用去网页下。"
-            )
-            btn_go = box.addButton("立即更新", QMessageBox.ButtonRole.AcceptRole)
-        else:
-            box.setText(
-                f"发现新版本 {tag}（你现在是 v{__version__}）。\n点「打开下载页」去下载新版 exe。"
-            )
-            btn_go = box.addButton("打开下载页", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("以后再说", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is not btn_go:
-            return
-        if frozen and asset_url:
-            self._start_self_update(tag, asset_url, size, sha)
-        else:
-            QDesktopServices.openUrl(QUrl(url or (REPO_URL + "/releases")))
-
-    def _start_self_update(self, tag: str, asset_url: str, size: int, sha: str):
-        # 更新落点分两种：
-        # - 安装版（当前文件名就是 MuseChrome.exe）：新版下到数据目录，
-        #   更新时原地覆盖同名文件，桌面快捷方式永远有效。
-        # - 便携版（文件名带版本号）：新版直接下到当前 exe 同目录、用新版文件名，
-        #   更新后文件名跟版本走，不再把新内容塞进旧文件名里。
-        cur = Path(sys.executable)
-        if cur.name.lower() == "musechrome.exe":
-            dest = store.data_dir() / "update" / f"MuseChrome-{tag}.exe"
-        else:
-            dest = cur.parent / f"MuseChrome-{tag}.exe"
-            if dest == cur:  # 同名兜底（理论上不会发生）：走覆盖模式
-                dest = store.data_dir() / "update" / f"MuseChrome-{tag}.exe"
-        dlg = QProgressDialog("正在下载新版本…", "取消", 0, 100, self)
-        dlg.setWindowTitle("检查更新")
-        dlg.setMinimumWidth(360)
-        dlg.setValue(0)
-        self._dl = DownloadThread(
-            asset_url, dest, store.fetch_proxy_url(self.cfg), size, sha, self
-        )
-        self._dl_progress = dlg
-        self._dl.progress.connect(lambda p: dlg.setValue(p if p >= 0 else 0))
-        self._dl.done.connect(lambda ok2, path, why: self._on_download_done(ok2, path, why, tag))
-        dlg.canceled.connect(self._dl.requestInterruption)
-        self._dl.start()
-        dlg.show()
-
-    def _on_download_done(self, ok: bool, path: str, why: str, tag: str):
-        if hasattr(self, "_dl_progress"):
-            self._dl_progress.close()
-        if not ok:
-            if why != "已取消":
-                QMessageBox.information(
-                    self, "检查更新",
-                    f"下载失败：{why}。\n（先确认代理工具开着，再试一次；也可以去 GitHub 发布页手动下载。）",
-                )
-            return
-        new_exe = Path(path)
-        cur_exe = Path(sys.executable)
-        rename_mode = new_exe.parent == cur_exe.parent and new_exe != cur_exe
-        if rename_mode:
-            QMessageBox.information(
-                self, "检查更新",
-                f"新版本 {tag} 已下载并校验通过（{new_exe.name}）。\n"
-                "点「确定」后软件会自动关闭、删掉旧文件并打开新版。",
-            )
-            bat = new_exe.parent / "apply_update.bat"
-            bat.write_text(build_rename_bat(new_exe, cur_exe), encoding="mbcs")
-        else:
-            QMessageBox.information(
-                self, "检查更新",
-                f"新版本 {tag} 已下载并校验通过。\n点「确定」后软件会自动关闭、替换成新版并重新打开。",
-            )
-            bat = new_exe.parent / "apply_update.bat"
-            bat.write_text(build_updater_bat(new_exe, cur_exe), encoding="mbcs")
-        try:
-            kwargs = {}
-            if sys.platform.startswith("win"):
-                kwargs["creationflags"] = (
-                    subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-                )
-            subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True, **kwargs)
-        except Exception as exc:
-            QMessageBox.critical(self, "检查更新", f"启动更新失败：{exc}\n新文件已下载在：{new_exe}")
-            return
-        QApplication.quit()
 
     # ---------- 设置 ----------
     def save_mail_path(self, key: str, path: str):
@@ -2307,11 +1303,14 @@ class MainWindow(QMainWindow):
         else:
             self.page_settings.lbl_saved.setText("已保存 ✓")
 
-    # ---------- 备份 / 恢复 ----------
+    # ---------- 备份导出 ----------
     def export_backup(self):
+        if self._launched:
+            QMessageBox.warning(self, "导出备份", "请先关闭所有账号浏览器后再导出。若浏览器由外部打开，也请先手动关闭，避免备份不完整。")
+            return
         box = QMessageBox(self)
         box.setWindowTitle("导出备份")
-        box.setText("选备份范围：\n\n完整备份：账号、设置和每个账号的登录态全打包，换电脑导入后免登录。\n轻量备份：只打包账号列表和设置，导入后每个账号要重新登录一次。\n\n完整备份里含登录凭证，等于钥匙，请自己收好、不要外传。")
+        box.setText("选备份范围：\n\n完整备份：账号列表、设置和浏览器配置文件；可能含登录凭证，不保证跨电脑恢复登录态。\n轻量备份：仅账号列表和设置。\n\n请先手动关闭所有账号浏览器。备份可能包含邮箱、代理配置、浏览历史等敏感信息，请妥善保管。当前版本不提供导入恢复入口。")
         btn_full = box.addButton("完整备份", QMessageBox.ButtonRole.AcceptRole)
         btn_light = box.addButton("轻量备份", QMessageBox.ButtonRole.ActionRole)
         box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
@@ -2330,40 +1329,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "导出备份", f"导出失败：{exc}")
 
-    def import_backup(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择备份文件", "", "Zip 备份 (*.zip)")
-        if not path:
-            return
-        ret = QMessageBox.question(
-            self, "导入恢复",
-            "导入会覆盖现在的账号列表和设置（覆盖前的版本会自动留一份在 MuseChromeData 里）。\n如果备份含登录态，正在打开的浏览器请先关掉。继续？",
-        )
-        if ret != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            summary = store.import_backup(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "导入恢复", f"导入失败：{exc}")
-            return
-        self.cfg = store.load_config()
-        self.accounts = store.load_accounts()
-        if not self.accounts:
-            self.accounts = [{"id": store.new_account_id(), "name": "账号 1", "browser": "chrome", "proxy": ""}]
-            store.save_accounts(self.accounts)
-        self._selected_id = self.accounts[0]["id"]
-        self._refresh_proxy_label()
-        self.page_settings.load(self.cfg)
-        self._rebuild_cards()
-        tail = "含登录态，打开账号应该免登录。" if summary["profiles"] else "不含登录态，每个账号要重新登录一次。"
-        QMessageBox.information(self, "导入恢复", f"已恢复 {summary['accounts']} 个账号。{tail}")
-
 
 def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     cfg = store.load_config()
-    # 颜色方案跟随外观设置：浅色时强制浅色（系统深色下调色板文字会变白，
-    # 压到浅色底上看不见，插件名单就这么丢过）；选了深色就让对话框也走深色
+    # 对话框颜色方案跟随外观设置。
     try:
         app.styleHints().setColorScheme(
             Qt.ColorScheme.Dark if cfg.get("theme") == "dark" else Qt.ColorScheme.Light
@@ -2380,6 +1351,10 @@ def run() -> int:
     icon = app_icon()
     if not icon.isNull():
         app.setWindowIcon(icon)
-    window = MainWindow(cfg)
+    try:
+        window = MainWindow(cfg)
+    except store.AccountDataError as exc:
+        QMessageBox.critical(None, "账号数据无法读取", str(exc))
+        return 1
     window.show()
     return app.exec()

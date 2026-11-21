@@ -38,8 +38,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python tests/test_mail_assist_ui.py
 
-      - name: Test update helpers
-        run: python tests/test_update.py
+      - name: Test retained features and removed entry points
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tests/test_app_pruning.py
 
       - name: Check Python syntax
         run: python -m py_compile musechrome/app.py musechrome/store.py musechrome/auto_login.py
