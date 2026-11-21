@@ -197,9 +197,10 @@ class StoreTests(unittest.TestCase):
                 with self.assertRaises(store.AccountDataError):
                     store.delete_profile_dir("redirected")
                 remove.assert_not_called()
+        profile_root = store.profiles_dir()
         redirected_root = store.data_dir() / "edge-profiles"
         def fixture_root_resolve(path, *args, **kwargs):
-            if path == root:
+            if path == profile_root:
                 return redirected_root
             return real_resolve(path, *args, **kwargs)
         with patch.object(Path, "resolve", fixture_root_resolve), patch.object(store.shutil, "rmtree") as remove:
