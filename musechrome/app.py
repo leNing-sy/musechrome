@@ -276,8 +276,8 @@ def _paint_bg(widget: QWidget) -> None:
 
 NOTE_TEXT = """使用说明：
 • 点「打开」启动该账号独立的 Chrome / Edge；首次使用需自行登录，后续保留本账号的浏览器数据。
-• Chrome 与 Edge 的配置目录分开。Edge 的微软登录和同步行为可能随版本、策略变化；首次打开请自行确认登录与同步状态。
-• 选 Edge 后可点「复制邮箱并打开取件链接」，选择 CSV 邮箱、自行取验证码，再回账号窗口完成登录。
+• Chrome 与 Edge 的配置目录分开；首次使用各自登录。浏览器运行时不能切换，先关闭当前账号浏览器。
+• 两种浏览器都可点「邮箱辅助」，选择 CSV 邮箱；收件地址留空只复制，填写后按设置打开收件页，自行取验证码。
 • 打开前确认代理已就绪；全局代理可在左侧「代理检测」测试，按账号代理需单独确认。
 • 改浏览器、代理或语言设置前，先关闭该账号的浏览器；外观可从左侧切换。"""
 
@@ -289,6 +289,9 @@ class SettingsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         title = QLabel("设置")
+        self._loading = False
+        self._legacy_address_error = False
+        self._mail_address_original = ""
         title.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {C['text']};")
 
         self.cmb_mode = QComboBox()
@@ -335,19 +338,28 @@ class SettingsPage(QWidget):
         mail_csv_row = QHBoxLayout()
         mail_csv_row.addWidget(self.edt_mail_csv, 1)
         mail_csv_row.addWidget(btn_browse_mail_csv)
-        self.edt_mail_config = QLineEdit()
-        self.edt_mail_config.setPlaceholderText("留空使用默认取件地址，无需准备 config.json")
-        btn_browse_mail_config = QPushButton("浏览…")
-        btn_browse_mail_config.clicked.connect(self._browse_mail_config)
-        mail_config_row = QHBoxLayout()
-        mail_config_row.addWidget(self.edt_mail_config, 1)
-        mail_config_row.addWidget(btn_browse_mail_config)
+        self.edt_mail_address = QLineEdit()
+        self.edt_mail_address.setPlaceholderText("留空仅复制邮箱；或填收件网址 / 含 {email} 的模板")
+        self.lbl_mail_address_status = QLabel("")
+        self.lbl_mail_address_status.setWordWrap(True)
+        self.cmb_mail_target = QComboBox()
+        self.cmb_mail_target.addItem("当前账号浏览器（独立环境）", "account")
+        self.cmb_mail_target.addItem("系统默认浏览器", "system")
+        mail_presets = QHBoxLayout()
+        for label, address in (
+            ("仅复制邮箱", ""),
+            ("原取件服务", auto_login.DEFAULT_MAIL_API_BASE + "/{email}"),
+            ("Outlook", "https://outlook.live.com/mail/"),
+            ("Gmail", "https://mail.google.com/mail/"),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, value=address: self._apply_mail_preset(value))
+            mail_presets.addWidget(button)
         self.edt_mail_csv.editingFinished.connect(
             lambda: self.mail_path_selected.emit("mail_accounts_csv", self.edt_mail_csv.text())
         )
-        self.edt_mail_config.editingFinished.connect(
-            lambda: self.mail_path_selected.emit("mail_config_path", self.edt_mail_config.text())
-        )
+        self.edt_mail_address.editingFinished.connect(self._mail_address_edited)
+        self.cmb_mail_target.currentIndexChanged.connect(self._mail_target_changed)
         self.chk_lang = QCheckBox("英文语言标识（启动时带 --lang=en-US，让浏览器语言与代理出口地区一致）")
         self.chk_webrtc = QCheckBox("WebRTC 防泄漏（禁止 WebRTC 走非代理 UDP，避免真实 IP 从 WebRTC 泄漏）")
         self.cmb_theme = QComboBox()
@@ -364,14 +376,18 @@ class SettingsPage(QWidget):
         form.addRow("Chrome 路径", chrome_row)
         form.addRow("Edge 路径", edge_row)
         form.addRow("邮箱 CSV", mail_csv_row)
-        form.addRow("自定义取件配置（可选）", mail_config_row)
+        form.addRow("收件地址", self.edt_mail_address)
+        form.addRow("快捷填写", mail_presets)
+        form.addRow("收件页打开位置", self.cmb_mail_target)
+        form.addRow("", self.lbl_mail_address_status)
         form.addRow(self.chk_lang)
         form.addRow(self.chk_webrtc)
         form.addRow("外观", self.cmb_theme)
 
         note = QLabel(
-            "邮箱辅助登录只需选择含「邮箱」列的 CSV，邮箱文件路径选择后自动保存。\n"
-            f"默认取件地址：{auto_login.DEFAULT_MAIL_API_BASE}；自定义取件配置可留空。\n"
+            "Chrome 和 Edge 均可使用邮箱辅助。CSV 只需「邮箱」列，可加「收件地址」列覆盖全局地址。\n"
+            "邮箱文件、收件地址和打开位置自动保存，不需要另外准备 config.json。\n"
+            "地址含 {email} 时自动填入所选邮箱；固定网址打开后仍需自行确认邮箱登录账号。\n"
             "其他设置修改后请点击「保存设置」。Chrome / Edge 路径留空 = 自动查找。"
         )
         note.setWordWrap(True)
@@ -408,6 +424,7 @@ class SettingsPage(QWidget):
         layout.addStretch(1)
 
     def load(self, cfg: dict):
+        self._loading = True
         mode = cfg.get("proxy_mode", "local")
         idx = self.cmb_mode.findData(mode)
         self.cmb_mode.setCurrentIndex(idx if idx >= 0 else 0)
@@ -419,12 +436,39 @@ class SettingsPage(QWidget):
         self.edt_chrome.setText(str(cfg["chrome_path"]))
         self.edt_edge.setText(str(cfg["edge_path"]))
         self.edt_mail_csv.setText(str(cfg.get("mail_accounts_csv", "")))
-        self.edt_mail_config.setText(str(cfg.get("mail_config_path", "")))
+        self.set_mail_address_from_config(cfg)
+        self.cmb_mail_target.setCurrentIndex(max(0, self.cmb_mail_target.findData(cfg.get("mail_open_target", "account"))))
         self.chk_lang.setChecked(bool(cfg["lang_en"]))
         self.chk_webrtc.setChecked(bool(cfg["webrtc_protect"]))
         tidx = self.cmb_theme.findData(cfg.get("theme", "light"))
         self.cmb_theme.setCurrentIndex(tidx if tidx >= 0 else 0)
         self.lbl_saved.setText("")
+        self._loading = False
+
+    def set_mail_address_from_config(self, cfg: dict):
+        self._mail_address_original = cfg.get("mail_address", "")
+        try:
+            address = auto_login.configured_mail_address(cfg)
+        except auto_login.MailAssistError:
+            self.edt_mail_address.setText("")
+            self._legacy_address_error = True
+            self.lbl_mail_address_status.setText("已保存的收件配置无效或不可读取。请重新填写地址，或点击「仅复制邮箱」。")
+        else:
+            self.edt_mail_address.setText(address)
+            self._legacy_address_error = False
+            self.lbl_mail_address_status.setText("")
+
+    def _mail_address_edited(self):
+        if not self._loading and (not self._legacy_address_error or self.edt_mail_address.isModified()):
+            self.mail_path_selected.emit("mail_address", self.edt_mail_address.text())
+
+    def _mail_target_changed(self):
+        if not self._loading:
+            self.mail_path_selected.emit("mail_open_target", self.cmb_mail_target.currentData())
+
+    def _apply_mail_preset(self, address: str):
+        self.edt_mail_address.setText(address)
+        self.mail_path_selected.emit("mail_address", address)
 
     def collect(self) -> dict:
         mode = self.cmb_mode.currentData()
@@ -438,7 +482,9 @@ class SettingsPage(QWidget):
             chrome_path=self.edt_chrome.text().strip(),
             edge_path=self.edt_edge.text().strip(),
             mail_accounts_csv=self.edt_mail_csv.text().strip(),
-            mail_config_path=self.edt_mail_config.text().strip(),
+            mail_address=(self._mail_address_original if self._legacy_address_error and not self.edt_mail_address.isModified()
+                          else self.edt_mail_address.text().strip()),
+            mail_open_target=self.cmb_mail_target.currentData(),
             lang_en=self.chk_lang.isChecked(),
             webrtc_protect=self.chk_webrtc.isChecked(),
             theme=self.cmb_theme.currentData(),
@@ -478,25 +524,15 @@ class SettingsPage(QWidget):
             self.edt_mail_csv.setText(path)
             self.mail_path_selected.emit("mail_accounts_csv", path)
 
-    def _browse_mail_config(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择邮件服务 config.json", self.edt_mail_config.text(),
-            "JSON 文件 (*.json);;所有文件 (*)",
-        )
-        if path:
-            self.edt_mail_config.setText(path)
-            self.mail_path_selected.emit("mail_config_path", path)
-
-
 ABOUT_TEXT = """Muse 账号管理器 · 精简二开版
 
 为每个账号准备独立的 Chrome / Edge 配置目录，保留账号管理、代理设置和邮箱辅助。浏览器由本机提供，程序不内置浏览器或自动化运行时。
 
-邮箱辅助只读取 CSV 的邮箱列，把选中的邮箱复制到剪贴板，并交给默认浏览器打开取件链接；验证码和网站登录由你完成。
+邮箱辅助读取 CSV 的邮箱及可选收件地址列，复制所选邮箱，并按设置在当前账号浏览器或系统默认浏览器打开收件页；地址留空时只复制。验证码和网站登录由你完成。
 
 数据位于软件旁的 MuseChromeData 文件夹。代理检测仅在手动点击后请求测试页；已移除公告、插件助手及软件内更新，新版需手动获取。"""
 
-DISCLAIMER_TEXT = """1. 永久免费，认准官方渠道：本软件永久免费、开源发布（MIT 许可），官方版本不含病毒和恶意代码。请只从官方 GitHub 仓库的 Releases 页面下载；任何收费出售本软件的都是骗局，从非官方渠道下载的版本可能被篡改或捆绑恶意程序，由此造成的损失作者概不负责。
+DISCLAIMER_TEXT = """1. 来源与许可：本项目基于 xiaoyaodev/musechrome 二次开发，按 MIT 许可发布。请从本项目的 GitHub 构建获取程序，并核对对应提交和校验信息。
 
 2. 责任限制：本软件按「现状」提供，不作任何明示或暗示的担保。因使用本软件而引致的任何意外、疏忽、合同纠纷、名誉损害、版权或知识产权侵犯及其所造成的损失，以及账号受限、数据丢失等后果，作者概不负责，亦不承担任何法律责任，由使用者自行承担。
 
@@ -829,7 +865,11 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         _paint_bg(self.stack)
         self.stack.addWidget(accounts_page)
-        self.stack.addWidget(self.page_settings)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setWidget(self.page_settings)
+        _paint_bg(settings_scroll.viewport())
+        self.stack.addWidget(settings_scroll)
         self.stack.addWidget(self.page_health)
         self.stack.addWidget(self.page_about)
         for i in range(self.stack.count()):
@@ -968,12 +1008,15 @@ class MainWindow(QMainWindow):
         btn_open.setObjectName("darkBtn")
         btn_open.clicked.connect(lambda _c=False, aid=acc["id"]: (self._select_account(aid), self.open_account()))
         cl.addWidget(btn_open)
-        btn_mail_assist = QPushButton("复制邮箱并打开取件链接")
+        btn_mail_assist = QPushButton("邮箱辅助")
         btn_mail_assist.clicked.connect(
             lambda _c=False, aid=acc["id"]: self.start_mail_assist(aid)
         )
-        btn_mail_assist.setVisible(is_edge)
         cl.addWidget(btn_mail_assist)
+        btn_seg_chrome.setEnabled(not opened)
+        btn_seg_edge.setEnabled(not opened)
+        if opened:
+            seg.setToolTip("关闭当前账号浏览器后可切换浏览器。")
         btn_seg_chrome.clicked.connect(
             lambda _c=False, aid=acc["id"], bo=btn_open, ba=btn_mail_assist,
             bc=btn_seg_chrome, be=btn_seg_edge:
@@ -1019,13 +1062,27 @@ class MainWindow(QMainWindow):
         for acc in self.accounts:
             if acc["id"] == acc_id:
                 if acc.get("browser") != browser:
+                    proc = self._procs.get(acc_id)
+                    if acc_id in self._launched or (proc is not None and proc.poll() is None):
+                        btn_chrome.setChecked(acc.get("browser") == "chrome")
+                        btn_edge.setChecked(acc.get("browser") == "edge")
+                        QMessageBox.information(self, "切换浏览器", "请先关闭这个账号的浏览器，再切换 Chrome / Edge。")
+                        return
+                    candidate = [dict(item, browser=browser) if item["id"] == acc_id else item
+                                 for item in self.accounts]
+                    try:
+                        store.save_accounts(candidate)
+                    except (OSError, store.AccountDataError):
+                        btn_chrome.setChecked(acc.get("browser") == "chrome")
+                        btn_edge.setChecked(acc.get("browser") == "edge")
+                        QMessageBox.warning(self, "切换失败", "无法保存浏览器选择，原设置已保留。")
+                        return
                     acc["browser"] = browser
-                    store.save_accounts(self.accounts)
                 break
         btn_chrome.setChecked(browser == "chrome")
         btn_edge.setChecked(browser == "edge")
         btn_open.setText("打开 Edge" if browser == "edge" else "打开 Chrome")
-        btn_mail_assist.setVisible(browser == "edge")
+        btn_mail_assist.setVisible(True)
 
     # ---------- 账号管理 ----------
     def _current_account(self) -> dict | None:
@@ -1115,6 +1172,9 @@ class MainWindow(QMainWindow):
         acc = self._current_account()
         if acc is None:
             return
+        if acc["id"] in self._launched:
+            QMessageBox.information(self, "删除账号", "请先关闭这个账号的浏览器，再删除账号。")
+            return
         if len(self.accounts) == 1:
             QMessageBox.information(self, "删除账号", "至少保留一个账号，不能删光。")
             return
@@ -1141,67 +1201,83 @@ class MainWindow(QMainWindow):
     # ---------- 打开浏览器 ----------
     def start_mail_assist(self, acc_id: str):
         acc = next((item for item in self.accounts if item["id"] == acc_id), None)
-        if acc is None or acc.get("browser") != "edge":
-            QMessageBox.information(self, "邮箱辅助登录", "此入口仅适用于选择 Edge 的账号。")
+        if acc is None:
+            QMessageBox.information(self, "邮箱辅助", "请选择一个有效账号。")
             return
-
         try:
-            mailboxes = auto_login.load_mailboxes(self.cfg.get("mail_accounts_csv", ""))
-            api_base = auto_login.load_mail_api_base(self.cfg.get("mail_config_path", ""))
+            entries = auto_login.load_mail_entries(self.cfg.get("mail_accounts_csv", ""))
         except auto_login.MailAssistError as exc:
-            QMessageBox.warning(
-                self, "邮箱辅助登录", str(exc)
-            )
+            QMessageBox.warning(self, "邮箱辅助", str(exc))
             return
-
         email, ok = QInputDialog.getItem(
-            self, "选择邮箱", "复制并用于本次 Muse 登录：", mailboxes, 0, False
+            self, "选择邮箱", "复制并用于本次登录：", [item["email"] for item in entries], 0, False
         )
         if not ok or not email:
             return
-
-        QApplication.clipboard().setText(email)
-        url = auto_login.mailbox_url(api_base, email)
-        if not QDesktopServices.openUrl(QUrl(url)):
-            QMessageBox.warning(
-                self, "邮箱辅助登录",
-                "邮箱已复制，但系统未能打开取件链接。你可以检查默认浏览器设置后重试。",
-            )
+        selected = next((item for item in entries if item["email"] == email), None)
+        if selected is None:
             return
+        try:
+            address = selected["address"] or auto_login.configured_mail_address(self.cfg)
+            url = auto_login.resolve_mail_url(address, email)
+        except auto_login.MailAssistError as exc:
+            QMessageBox.warning(self, "邮箱辅助", str(exc))
+            return
+        QApplication.clipboard().setText(email)
+        if not url:
+            QMessageBox.information(self, "邮箱辅助", "邮箱已复制。当前未设置收件地址，请自行查收邮件。")
+            return
+        if self.cfg.get("mail_open_target", "account") == "system":
+            if not QDesktopServices.openUrl(QUrl(url)):
+                QMessageBox.warning(self, "邮箱辅助", "邮箱已复制，但未能打开收件页。请检查系统默认浏览器设置。")
+                return
+            location = "系统默认浏览器"
+        else:
+            if not self._launch_account(acc, target_url=url):
+                return
+            location = "当前账号的 " + ("Edge" if acc.get("browser") == "edge" else "Chrome")
         QMessageBox.information(
-            self, "邮箱辅助登录",
-            "邮箱已复制，取件链接已在默认浏览器中打开。请自行查收验证码，再到账号的 Edge 窗口完成登录。",
+            self, "邮箱辅助",
+            f"邮箱已复制，收件页已在{location}中打开。请确认收件页的邮箱账号，再自行查收验证码完成网站登录。",
         )
 
     def open_account(self):
         acc = self._current_account()
-        if acc is None:
-            return
+        if acc is not None:
+            return self._launch_account(acc)
+        return False
+
+    def _launch_account(self, acc: dict, target_url: str | None = None) -> bool:
+        """Use the account's browser/profile for either its home or a mailbox URL."""
         kind = acc.get("browser") or "chrome"
-        is_edge = kind == "edge"
-        label = "Edge" if is_edge else "Chrome"
-        exe_name = "msedge.exe" if is_edge else "chrome.exe"
-        cfg_key = "edge_path" if is_edge else "chrome_path"
+        label = "Edge" if kind == "edge" else "Chrome"
+        exe_name = "msedge.exe" if kind == "edge" else "chrome.exe"
+        cfg_key = "edge_path" if kind == "edge" else "chrome_path"
         exe = store.find_browser_exe(self.cfg, kind)
         if not exe:
             ret = QMessageBox.warning(
                 self, f"找不到 {label}",
-                f"没在常见位置找到 {exe_name}。\n点「是」手动选一次 {exe_name}，我会记到设置里。",
+                f"没找到 {exe_name}。点「是」手动选择浏览器程序。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if ret == QMessageBox.StandardButton.Yes:
                 path, _ = QFileDialog.getOpenFileName(self, f"选择 {exe_name}", "", f"{exe_name} ({exe_name})")
                 if path:
-                    self.cfg[cfg_key] = path
-                    store.save_config(self.cfg)
+                    candidate = {**self.cfg, cfg_key: path}
+                    try:
+                        store.save_config(candidate)
+                    except OSError:
+                        QMessageBox.warning(self, "打开失败", "无法保存浏览器路径，请确认软件目录可写。")
+                        return False
+                    self.cfg = candidate
                     exe = path
             if not exe:
-                return
-        profile = store.profile_dir_for_browser(acc["id"], kind)
-        args = [exe, *store.build_chrome_args(
-            store.effective_cfg(self.cfg, acc), profile, browser=kind
-        )]
+                return False
         try:
+            profile = store.profile_dir_for_browser(acc["id"], kind)
+            args = [exe, *store.build_chrome_args(
+                store.effective_cfg(self.cfg, acc), profile, browser=kind, target_url=target_url
+            )]
             kwargs = {}
             if sys.platform.startswith("win"):
                 kwargs["creationflags"] = (
@@ -1214,11 +1290,14 @@ class MainWindow(QMainWindow):
                 self._launched_at[acc["id"]] = time.time()
             self._launched.add(acc["id"])
             self._rebuild_cards()
-        except Exception as exc:  # 启动失败要如实报错，不装没事
-            QMessageBox.critical(self, "打开失败", f"{label} 启动失败：{exc}")
+            return True
+        except (OSError, store.AccountDataError) as exc:
+            message = str(exc) if isinstance(exc, store.AccountDataError) else f"{label} 启动失败，请检查浏览器路径和目录访问权限。"
+            QMessageBox.critical(self, "打开失败", message)
+            return False
 
     def close_account_browser(self, acc_id: str):
-        """关掉这个账号的浏览器：先给窗口发关闭消息（优雅关），3 秒没退就结束进程。"""
+        """Only clear tracking after the browser process actually exits."""
         proc = self._procs.get(acc_id)
         if proc is not None and proc.poll() is None:
             _close_windows_for_pid(proc.pid)
@@ -1229,8 +1308,12 @@ class MainWindow(QMainWindow):
             if proc.poll() is None:
                 try:
                     proc.terminate()
-                except Exception:
+                    proc.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
                     pass
+            if proc.poll() is None:
+                QMessageBox.warning(self, "浏览器未关闭", "浏览器仍在运行，请手动关闭后再切换。当前运行状态已保留。")
+                return
         self._procs.pop(acc_id, None)
         self._launched.discard(acc_id)
         self._launched_at.pop(acc_id, None)
@@ -1254,32 +1337,41 @@ class MainWindow(QMainWindow):
 
     # ---------- 设置 ----------
     def save_mail_path(self, key: str, path: str):
-        fields = {
-            "mail_accounts_csv": self.page_settings.edt_mail_csv,
-            "mail_config_path": self.page_settings.edt_mail_config,
-        }
-        if key not in fields:
+        if key not in ("mail_accounts_csv", "mail_address", "mail_open_target"):
             return
         path = path.strip()
-        old_path = self.cfg.get(key, "")
-        if path == old_path:
+        if path == self.cfg.get(key, ""):
             return
         candidate = {**self.cfg, key: path}
         try:
             if key == "mail_accounts_csv" and path:
-                auto_login.load_mailboxes(path)
-            elif key == "mail_config_path":
-                auto_login.load_mail_api_base(path)
+                auto_login.load_mail_entries(path)
+            elif key == "mail_address":
+                auto_login.validate_mail_address(path)
+                candidate["mail_config_path"] = ""
+            elif key == "mail_open_target" and path not in ("account", "system"):
+                raise auto_login.MailAssistError("请选择收件页的打开位置。")
             store.save_config(candidate)
         except (auto_login.MailAssistError, OSError) as exc:
-            fields[key].setText(old_path)
+            page = self.page_settings
+            if key == "mail_accounts_csv":
+                page.edt_mail_csv.setText(self.cfg.get(key, ""))
+            elif key == "mail_address":
+                page.set_mail_address_from_config(self.cfg)
+            else:
+                page._loading = True
+                page.cmb_mail_target.setCurrentIndex(max(0, page.cmb_mail_target.findData(self.cfg.get(key, "account"))))
+                page._loading = False
             message = (str(exc) if isinstance(exc, auto_login.MailAssistError)
                        else "无法保存设置，请确认软件所在目录可写。原设置已保留。")
-            self.page_settings.lbl_saved.setText("邮箱设置未保存，已保留原设置")
+            page.lbl_saved.setText("邮箱设置未保存，已保留原设置")
             QMessageBox.warning(self, "邮箱设置未保存", message)
             return
         self.cfg = candidate
-        fields[key].setText(path)
+        if key == "mail_accounts_csv":
+            self.page_settings.edt_mail_csv.setText(path)
+        elif key == "mail_address":
+            self.page_settings.set_mail_address_from_config(candidate)
         self.page_settings.lbl_saved.setText("邮箱设置已自动保存 ✓")
 
     def save_settings(self):
@@ -1287,8 +1379,10 @@ class MainWindow(QMainWindow):
         candidate = {**self.cfg, **self.page_settings.collect()}
         try:
             if candidate.get("mail_accounts_csv"):
-                auto_login.load_mailboxes(candidate["mail_accounts_csv"])
-            auto_login.load_mail_api_base(candidate.get("mail_config_path", ""))
+                auto_login.load_mail_entries(candidate["mail_accounts_csv"])
+            auto_login.configured_mail_address(candidate)
+            if candidate.get("mail_address") is not None:
+                candidate["mail_config_path"] = ""
             store.save_config(candidate)
         except (auto_login.MailAssistError, OSError) as exc:
             message = (str(exc) if isinstance(exc, auto_login.MailAssistError)
@@ -1297,6 +1391,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "设置未保存", message)
             return
         self.cfg = candidate
+        self.page_settings.set_mail_address_from_config(candidate)
         self._refresh_proxy_label()
         if self.cfg.get("theme") != old_theme:
             self.page_settings.lbl_saved.setText("已保存 ✓（外观下次打开软件时生效）")

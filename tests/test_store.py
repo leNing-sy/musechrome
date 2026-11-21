@@ -34,6 +34,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.data_dir().name, "MuseChromeData")
         self.assertEqual(self.cfg["mail_accounts_csv"], "")
         self.assertEqual(self.cfg["mail_config_path"], "")
+        self.assertEqual(self.cfg["mail_address"], "")
+        self.assertEqual(self.cfg["mail_open_target"], "account")
         store.save_config({**self.cfg, "mail_accounts_csv": r"D:\fixtures\mail.csv",
                            "mail_config_path": r"D:\fixtures\mail.json"})
         loaded = store.load_config()
@@ -49,6 +51,34 @@ class StoreTests(unittest.TestCase):
         self.assertEqual((cfg["proxy_port"], cfg["proxy_type"], cfg["home_url"]),
                          (10808, "http", "https://muse.ai"))
 
+    def test_existing_mail_configuration_keeps_legacy_semantics_without_external_read(self):
+        legacy = {"mail_accounts_csv": "fixture.csv", "mail_config_path": "missing-mail.json"}
+        store.save_config(legacy)
+        config_path = store.data_dir() / "config.json"
+        before = config_path.read_bytes()
+        cfg = store.load_config()
+        self.assertIsNone(cfg["mail_address"])
+        self.assertEqual(cfg["mail_open_target"], "system")
+        self.assertEqual(cfg["mail_config_path"], "missing-mail.json")
+        self.assertEqual(config_path.read_bytes(), before)
+        store.save_config(cfg)
+        self.assertIsNone(store.load_config()["mail_address"])
+        store.save_config({**legacy, "mail_address": "", "mail_open_target": "account"})
+        self.assertEqual(store.load_config()["mail_address"], "")
+        self.assertEqual(store.load_config()["mail_open_target"], "account")
+        store.save_config({"mail_accounts_csv": ""})
+        self.assertEqual(store.load_config()["mail_address"], "")
+        self.assertEqual(store.load_config()["mail_open_target"], "account")
+
+    def test_generic_mail_settings_roundtrip_and_unknown_open_target(self):
+        cfg = {**self.cfg, "mail_address": "https://mail.example.test/?email={email}",
+               "mail_open_target": "system"}
+        store.save_config(cfg)
+        self.assertEqual(store.load_config()["mail_address"], cfg["mail_address"])
+        self.assertEqual(store.load_config()["mail_open_target"], "system")
+        store.save_config({**cfg, "mail_open_target": "unknown"})
+        self.assertEqual(store.load_config()["mail_open_target"], "account")
+
     def test_browser_arguments_retain_isolation_and_edge_restrictions(self):
         profile = self.root / "fixture-profile"
         chrome = store.build_chrome_args(self.cfg, profile)
@@ -60,14 +90,27 @@ class StoreTests(unittest.TestCase):
                      "--proxy-server=http://127.0.0.1:10808",
                      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--lang=en-US"):
             self.assertIn(flag, chrome)
-        for flag in ("--disable-signin", "--disable-sync", "--disable-features=msImplicitSignin"):
+        for flag in ("--disable-signin", "--disable-sync"):
             self.assertIn(flag, edge)
-            self.assertNotIn(flag, chrome)
+            self.assertIn(flag, chrome)
+        self.assertIn("--disable-features=msImplicitSignin", edge)
+        self.assertNotIn("--disable-features=msImplicitSignin", chrome)
         disabled = store.build_chrome_args({**self.cfg, "proxy_enabled": False,
                                             "webrtc_protect": False, "lang_en": False}, profile)
         self.assertFalse(any(arg.startswith("--proxy-server") for arg in disabled))
         self.assertFalse(any("webrtc" in arg for arg in disabled))
         self.assertNotIn("--lang=en-US", disabled)
+
+    def test_mail_target_uses_same_profile_and_arguments_without_opening_home(self):
+        profile = self.root / "fixture-profile"
+        target = "https://mail.example.test/a%2Bb%40example.test"
+        for browser in ("chrome", "edge"):
+            with self.subTest(browser=browser):
+                home = store.build_chrome_args(self.cfg, profile, browser=browser)
+                mail = store.build_chrome_args(self.cfg, profile, browser=browser, target_url=target)
+                self.assertEqual(mail[:-1], home[:-1])
+                self.assertEqual(mail[-1], target)
+                self.assertNotIn(self.cfg["home_url"], mail)
 
     def test_legacy_proxy_modes_and_per_account_overrides(self):
         for enabled, mode in ((True, "local"), (False, "off")):

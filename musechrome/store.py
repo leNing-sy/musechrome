@@ -39,8 +39,10 @@ DEFAULT_CONFIG = {
     "home_url": DEFAULT_HOME_URL,
     "chrome_path": "",  # 空 = 自动找
     "edge_path": "",  # 空 = 自动找
-    "mail_accounts_csv": "",  # 邮箱辅助登录列表（只使用邮箱列）
-    "mail_config_path": "",  # 可选自定义取件配置；留空使用默认取件地址
+    "mail_accounts_csv": "",  # 邮箱辅助登录列表（邮箱、可选收件地址列）
+    "mail_config_path": "",  # 仅兼容旧版 mail.apiBase 配置文件
+    "mail_address": "",  # 新安装仅复制邮箱；None 保留旧版收件配置
+    "mail_open_target": "account",  # account 当前账号浏览器 / system 系统默认浏览器
     "lang_en": True,  # 启动参数 --lang=en-US
     "webrtc_protect": True,  # 禁止 WebRTC 走非代理 UDP，防真实 IP 泄漏
     "theme": "light",  # light 浅色 / dark 深色（下次启动生效）
@@ -167,6 +169,14 @@ def load_config() -> dict:
     cfg["edge_path"] = str(cfg["edge_path"]).strip()
     cfg["mail_accounts_csv"] = str(cfg["mail_accounts_csv"] or "").strip()
     cfg["mail_config_path"] = str(cfg["mail_config_path"] or "").strip()
+    # 旧版已经选择 CSV 时保留原收件方式；仅记录兼容标识，不读取外部配置。
+    legacy_mail = isinstance(saved, dict) and bool(cfg["mail_accounts_csv"])
+    if legacy_mail and "mail_address" not in saved:
+        cfg["mail_address"] = None
+    if legacy_mail and "mail_open_target" not in saved:
+        cfg["mail_open_target"] = "system"
+    if cfg["mail_open_target"] not in ("account", "system"):
+        cfg["mail_open_target"] = "account"
     return cfg
 
 
@@ -348,6 +358,8 @@ def build_chrome_args(
     cfg: dict,
     profile_dir: Path,
     browser: str = "chrome",
+    *,
+    target_url: str | None = None,
 ) -> list[str]:
     """组装启动浏览器的命令行参数（网址放最后）。
 
@@ -358,11 +370,11 @@ def build_chrome_args(
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-signin",
+        "--disable-sync",
     ]
     if browser == "edge":
         args.extend([
-            "--disable-signin",
-            "--disable-sync",
             "--disable-features=msImplicitSignin",
         ])
     url = proxy_server_url(cfg)
@@ -372,7 +384,7 @@ def build_chrome_args(
         args.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
     if cfg.get("lang_en"):
         args.append("--lang=en-US")
-    args.append(str(cfg["home_url"]))
+    args.append(str(cfg["home_url"] if target_url is None else target_url))
     return args
 
 
